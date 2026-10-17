@@ -1581,6 +1581,45 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int enc_cache_cap = 0;
     int enc_cached_seq_total = 0;
     int64_t next_window_start = 0;
+    /* Resets. Each drops the decoder's text state and some cached audio:
+     *
+     *   reset            text kept         windows kept   audio decoded again
+     *   periodic trim    last 24 tokens    1              (with the text)
+     *     no punctuation language header  1              yes, aligned
+     *   stall            language header   none           partial window, aligned
+     *   pause            none              none           unemitted part, aligned;
+     *                                                     emitted part silenced
+     *   loop, soft       language header   1              yes, aligned after a wait
+     *   loop, hard       language header   none           no
+     *
+     * "Aligned": the new text is joined to the emitted text by alignment
+     * instead of being emitted whole. */
+#define STREAM_RESET_TEXT(keep_) do { \
+        n_raw_tokens = (keep_); \
+        n_stable_text_tokens = 0; \
+        min_prefix_raw = (keep_); \
+        held_text_tokens = 0; \
+        prev_prefill_len = 0; \
+    } while (0)
+    /* Negative windows_: clear the cache and restart the window grid at at_. */
+#define STREAM_RESET_AUDIO(windows_, at_) do { \
+        if ((windows_) < 0) \
+            stream_clear_enc_cache(enc_cache, &n_enc_cache, &enc_cache_start, \
+                                   &enc_cached_seq_total, &next_window_start, (at_)); \
+        else \
+            stream_trim_enc_cache(enc_cache, n_enc_cache, &enc_cache_start, \
+                                  &enc_cached_seq_total, (windows_)); \
+    } while (0)
+#define STREAM_REALIGN(hold_) do { \
+        stitch_pending = 1; \
+        stitch_tries = 0; \
+        stitch_hold = (hold_); \
+        STREAM_REDECODE_FROM_KEPT(); \
+    } while (0)
+#define STREAM_RESET_DONE() do { \
+        last_trim_chunk = chunk_idx; \
+        seam_space = 1; \
+    } while (0)
     float *prev_prefill_embeds = NULL;
     int prev_prefill_len = 0;
     int prev_prefill_cap = 0;
@@ -1609,13 +1648,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     double silent_run_sec = 0;
     int pause_reset_done = 0;
 #define STREAM_PAUSE_RESET() do { \
-        n_raw_tokens = 0; \
-        n_stable_text_tokens = 0; \
-        min_prefix_raw = 0; \
-        held_text_tokens = 0; \
-        prev_prefill_len = 0; \
-        stream_trim_enc_cache(enc_cache, n_enc_cache, &enc_cache_start, \
-                              &enc_cached_seq_total, 0); \
+        int realign_ = emitted_cursor < decoded_cursor; \
+        STREAM_RESET_TEXT(0); \
+        STREAM_RESET_AUDIO(0, 0); \
         if (local_samples) { \
             int64_t mf_ = next_window_start > local_base_sample ? next_window_start : local_base_sample; \
             int64_t mt_ = emitted_cursor; \
@@ -1623,13 +1658,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             for (int64_t m_ = mf_; m_ < mt_; m_++) local_samples[m_ - local_base_sample] = 0.0f; \
         } \
         quiet_chunks = 0; \
-        stitch_pending = emitted_cursor < decoded_cursor; \
-        stitch_tries = 0; \
-        stitch_hold = 0; \
-        STREAM_REDECODE_FROM_KEPT(); \
+        STREAM_REALIGN(0); \
+        stitch_pending = realign_; \
         pause_reset_done = 1; \
-        last_trim_chunk = chunk_idx; \
-        seam_space = 1; \
+        STREAM_RESET_DONE(); \
         if (qwen_verbose >= 2) fprintf(stderr, "  Pause reset applied\n"); \
     } while (0)
 
@@ -2650,22 +2682,11 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     periodic_no_text = !has_punct;
                 }
                 if (periodic_reset && periodic_no_text) {
-                    n_raw_tokens = text_start;
-                    n_stable_text_tokens = 0;
-                    min_prefix_raw = text_start;
-                    held_text_tokens = 0;
-                    prev_prefill_len = 0;
-                    stream_trim_enc_cache(enc_cache, n_enc_cache,
-                                          &enc_cache_start,
-                                          &enc_cached_seq_total,
-                                          QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
-                    stitch_pending = 1;
-                    stitch_tries = 0;
-                    stitch_hold = 0;
-                    STREAM_REDECODE_FROM_KEPT();
+                    STREAM_RESET_TEXT(text_start);
+                    STREAM_RESET_AUDIO(QWEN_STREAM_RESET_KEEP_ENC_WINDOWS, 0);
+                    STREAM_REALIGN(0);
+                    STREAM_RESET_DONE();
                     did_periodic_reset = 1;
-                    last_trim_chunk = chunk_idx;
-                    seam_space = 1;
                 } else if (periodic_reset) {
                     if (stream_reanchor_text_state(ctx,
                                                    emitted_text_tokens,
@@ -2682,13 +2703,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     min_prefix_raw = n_raw_tokens;
                     held_text_tokens = 0;
                     prev_prefill_len = 0;
-                    stream_trim_enc_cache(enc_cache, n_enc_cache,
-                                          &enc_cache_start,
-                                          &enc_cached_seq_total,
-                                          QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
+                    STREAM_RESET_AUDIO(QWEN_STREAM_RESET_KEEP_ENC_WINDOWS, 0);
+                    STREAM_RESET_DONE();
                     did_periodic_reset = 1;
-                    last_trim_chunk = chunk_idx;
-                    seam_space = 1;
                 }
                 /* New words in a chunk with no speech frame: speech too
                  * quiet for the frame test (low-SNR radio, say). Not a pause. */
@@ -2708,61 +2725,31 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 if (quiet_reset && !did_periodic_reset && !recovery_reset) {
                     /* Keep only the language header the model produced, so
                      * the restart does not re-detect (and switch) language. */
-                    n_raw_tokens = text_start;
-                    n_stable_text_tokens = 0;
-                    min_prefix_raw = text_start;
-                    held_text_tokens = 0;
-                    prev_prefill_len = 0;
-                    stream_clear_enc_cache(enc_cache,
-                                           &n_enc_cache,
-                                           &enc_cache_start,
-                                           &enc_cached_seq_total,
-                                           &next_window_start,
-                                           full_end);
+                    STREAM_RESET_TEXT(text_start);
+                    STREAM_RESET_AUDIO(-1, full_end);
                     quiet_chunks = 0;
-                    /* The partial window is decoded again. */
-                    stitch_pending = 1;
-                    stitch_tries = 0;
-                    stitch_hold = 0;
-                    STREAM_REDECODE_FROM_KEPT();
-                    last_trim_chunk = chunk_idx;
-                    seam_space = 1;
+                    STREAM_REALIGN(0);
+                    STREAM_RESET_DONE();
                     if (qwen_verbose >= 2) fprintf(stderr, "  Stall reset applied\n");
                 }
             }
             if (recovery_reset) {
                 /* Carry no text: the emitted tail is the loop itself. */
-                n_raw_tokens = text_start;
-                n_stable_text_tokens = 0;
-                min_prefix_raw = text_start;
-                held_text_tokens = 0;
-                prev_prefill_len = 0;
+                STREAM_RESET_TEXT(text_start);
                 if (chunk_idx - last_recovery_chunk <= 4) {
                     /* Second loop in a row on the same audio: drop it. */
-                    stream_clear_enc_cache(enc_cache,
-                                           &n_enc_cache,
-                                           &enc_cache_start,
-                                           &enc_cached_seq_total,
-                                           &next_window_start,
-                                           full_end);
+                    STREAM_RESET_AUDIO(-1, full_end);
                     stitch_pending = 0;
                     if (qwen_verbose >= 2) fprintf(stderr, "  Recovery mode: hard\n");
                 } else {
                     /* Keep the last window so the words around the loop
                      * are decoded again. */
-                    stream_trim_enc_cache(enc_cache, n_enc_cache,
-                                          &enc_cache_start,
-                                          &enc_cached_seq_total,
-                                          QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
-                    stitch_pending = 1;
-                    stitch_tries = 0;
-                    stitch_hold = 1;
-                    STREAM_REDECODE_FROM_KEPT();
+                    STREAM_RESET_AUDIO(QWEN_STREAM_RESET_KEEP_ENC_WINDOWS, 0);
+                    STREAM_REALIGN(1);
                     if (qwen_verbose >= 2) fprintf(stderr, "  Recovery mode: soft\n");
                 }
                 last_recovery_chunk = chunk_idx;
-                last_trim_chunk = chunk_idx;
-                seam_space = 1;
+                STREAM_RESET_DONE();
                 stagnant_chunks = 0;
                 quiet_chunks = 0;
                 did_recovery_reset = 1;
