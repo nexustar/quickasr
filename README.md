@@ -103,6 +103,7 @@ Streaming mode processes audio in **2-second chunks** with rollback text conditi
 4. Per chunk decode is bounded by `--stream-max-new-tokens` (default `32`).
 5. Only stable text is emitted; final chunk flushes remaining text.
 6. With live stdin, a pause also flushes: when no audio arrives for `--stream-idle-flush-ms` (default `800`), or on the first silent chunk after speech with `--skip-silence`, the buffered audio is decoded and the held-back text is emitted. The stream stays open and decoding continues from there when audio resumes. Without this a source that stops sending during silence (a voice gate, a paused capture) leaves the end of each utterance unprinted until the speaker resumes.
+7. With live stdin, after a longer pause (`--stream-pause-reset-ms`, default `3000`; an input stall, or with `--skip-silence` quiet audio) the next speech is decoded without the earlier text as context, so what was said before the break stops shaping what follows (for example Japanese text turning a switch to English into comma-separated single words). Without `--language` the language is detected again, so a speaker who switches language after a pause is followed. Audio that may still hold words of a quiet speaker is kept, and the new text is aligned to what was already printed.
 
 This keeps encoder recomputation under control. For long streams, a **sliding window** automatically bounds both encoder and decoder context so that memory and compute stay flat indefinitely:
 
@@ -130,6 +131,7 @@ Default stream settings:
 - `max_new_tokens`: 32 (`--stream-max-new-tokens`)
 - `past_text`: `auto` by default (effectively `yes` for `--stream`, `no` otherwise)
 - `idle_flush`: 800 ms (`--stream-idle-flush-ms`, `0` disables; live stdin only)
+- `pause_reset`: 3000 ms (`--stream-pause-reset-ms`, `0` disables; live stdin only)
 
 Streaming tuning:
 

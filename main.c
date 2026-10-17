@@ -91,6 +91,10 @@ static void usage(const char *prog) {
     fprintf(stderr, "                             processing > chunk_sec (display latency grows over time)\n");
     fprintf(stderr, "  --stream-idle-flush-ms <ms>  With --stdin --stream: when no audio arrives for this\n");
     fprintf(stderr, "                             long, emit the text still held back (default 800, 0=off)\n");
+    fprintf(stderr, "  --stream-pause-reset-ms <ms>  With --stdin --stream: after a pause this long, start\n");
+    fprintf(stderr, "                             the next speech without the earlier text as context\n");
+    fprintf(stderr, "                             (default 3000, 0=off). A pause is a stall of the input,\n");
+    fprintf(stderr, "                             or with --skip-silence quiet audio\n");
     fprintf(stderr, "  --stream-json              With --stream: print one JSON object per line,\n");
     fprintf(stderr, "                             {\"commit\":..., \"tail\":...}: commit is final text to\n");
     fprintf(stderr, "                             append, tail is the provisional rest and replaces the last one\n");
@@ -120,6 +124,7 @@ int main(int argc, char **argv) {
     int stream_max_new_tokens = -1; /* -1 = use default (32) */
     float stream_chunk_sec = -1; /* -1 = use default (2s) */
     int stream_idle_flush_ms = -1; /* -1 = use default (800) */
+    int stream_pause_reset_ms = -1; /* -1 = use default (3000) */
     int stream_json = 0;
     float enc_window_sec = -1;   /* -1 = use default (8s) */
     const char *prompt_text = NULL;
@@ -145,6 +150,12 @@ int main(int argc, char **argv) {
             stream_max_new_tokens = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--stream-chunk-sec") == 0 && i + 1 < argc) {
             stream_chunk_sec = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--stream-pause-reset-ms") == 0 && i + 1 < argc) {
+            stream_pause_reset_ms = atoi(argv[++i]);
+            if (stream_pause_reset_ms < 0) {
+                fprintf(stderr, "Error: --stream-pause-reset-ms must be >= 0\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--stream-idle-flush-ms") == 0 && i + 1 < argc) {
             stream_idle_flush_ms = atoi(argv[++i]);
             if (stream_idle_flush_ms < 0) {
@@ -239,6 +250,7 @@ int main(int argc, char **argv) {
     if (stream_max_new_tokens > 0) ctx->stream_max_new_tokens = stream_max_new_tokens;
     if (stream_chunk_sec >= 0) ctx->stream_chunk_sec = stream_chunk_sec;
     if (stream_idle_flush_ms >= 0) ctx->stream_idle_flush_ms = stream_idle_flush_ms;
+    if (stream_pause_reset_ms >= 0) ctx->stream_pause_reset_ms = stream_pause_reset_ms;
     if (past_text_conditioning_mode >= 0)
         ctx->past_text_conditioning = past_text_conditioning_mode;
     else if (stream_mode)

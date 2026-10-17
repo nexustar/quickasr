@@ -245,6 +245,7 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
     ctx->stream_rollback = 5;
     ctx->stream_unfixed_chunks = 2;
     ctx->stream_idle_flush_ms = 800;
+    ctx->stream_pause_reset_ms = 3000;
     ctx->stream_max_new_tokens = 32;
     ctx->past_text_conditioning = 0;
     ctx->skip_silence = 0;
@@ -1543,6 +1544,37 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int rms_hist_pos = 0;
     int rms_hist_count = 0;
     int consecutive_silence_skips = 0;
+    /* After a pause the text before it would keep shaping what follows, so
+     * it is dropped. The silence test is relative and a quiet speaker can
+     * pass it: windows overlapping the silent run are kept and re-decoded.
+     * Without --language the language header goes too: the speaker may
+     * have switched. */
+    double pause_reset_sec = ctx->stream_pause_reset_ms / 1000.0;
+    double silent_run_sec = 0;
+    int64_t silent_run_start = -1;  /* first sample of the current silent run */
+    int pause_reset_done = 0;
+#define STREAM_PAUSE_RESET() do { \
+        n_raw_tokens = 0; \
+        n_stable_text_tokens = 0; \
+        min_prefix_raw = 0; \
+        held_text_tokens = 0; \
+        prev_prefill_len = 0; \
+        int keep_ = 0; \
+        if (silent_run_start >= 0) { \
+            for (int w_ = n_enc_cache - 1; w_ >= enc_cache_start; w_--) { \
+                if (enc_cache[w_].start_sample + enc_cache[w_].n_samples > silent_run_start) keep_++; \
+                else break; \
+            } \
+        } \
+        stream_trim_enc_cache(enc_cache, n_enc_cache, &enc_cache_start, \
+                              &enc_cached_seq_total, keep_); \
+        quiet_chunks = 0; \
+        stitch_pending = 1; \
+        stitch_tries = 0; \
+        stitch_hold = 0; \
+        pause_reset_done = 1; \
+        if (qwen_verbose >= 2) fprintf(stderr, "  Pause reset applied\n"); \
+    } while (0)
 
     while (audio_cursor < audio_n_samples || (live && !live_eof)) {
         int is_flush = 0;
@@ -1559,20 +1591,33 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 int64_t have = live->sample_offset + live->n_samples;
                 int pending = (held_text_tokens > 0 || have > audio_cursor) &&
                               have != last_flush_samples;
-                if (ctx->stream_idle_flush_ms <= 0 || !pending) {
-                    pthread_cond_wait(&live->cond, &live->mutex);
-                    continue;
-                }
                 double now_ms = get_time_ms();
                 if (have != idle_seen_samples) {
                     idle_seen_samples = have;
                     idle_since_ms = now_ms;
                 }
-                double remain_ms = idle_since_ms + ctx->stream_idle_flush_ms - now_ms;
+                /* First the idle flush; once nothing is pending, the pause
+                 * reset if the stall goes on. */
+                double deadline_ms = -1;
+                if (ctx->stream_idle_flush_ms > 0 && pending) {
+                    deadline_ms = idle_since_ms + ctx->stream_idle_flush_ms;
+                } else if (!pending && !pause_reset_done && pause_reset_sec > 0 &&
+                           (n_raw_tokens > 0 || n_enc_cache > enc_cache_start)) {
+                    deadline_ms = idle_since_ms + pause_reset_sec * 1000.0;
+                }
+                if (deadline_ms < 0) {
+                    pthread_cond_wait(&live->cond, &live->mutex);
+                    continue;
+                }
+                double remain_ms = deadline_ms - now_ms;
                 if (remain_ms <= 0) {
-                    is_flush = 1;
-                    last_flush_samples = have;
-                    break;
+                    if (pending) {
+                        is_flush = 1;
+                        last_flush_samples = have;
+                        break;
+                    }
+                    STREAM_PAUSE_RESET();
+                    continue;
                 }
                 struct timeval tv;
                 gettimeofday(&tv, NULL);
@@ -1703,10 +1748,14 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 }
 
                 if (chunk_rms < threshold && held_text_tokens > 0 &&
-                    ctx->stream_idle_flush_ms > 0) {
-                    /* First silent chunk after speech: decode it once so the
-                     * held tail comes out now, not when speech resumes. */
+                    ctx->stream_idle_flush_ms > 0 && consecutive_silence_skips > 0) {
+                    /* Second silent chunk after speech: decode once so the
+                     * held tail comes out now, not when speech resumes.
+                     * Not the first: "silent" is relative, sentences often
+                     * end softly, and flushing there loses the last word. */
                     is_flush = 1;
+                    if (silent_run_start < 0) silent_run_start = chunk_start;
+                    silent_run_sec += (double)chunk_len / QWEN_SAMPLE_RATE;
                 } else if (chunk_rms < threshold &&
                     consecutive_silence_skips < QWEN_STREAM_MAX_SILENCE_SKIPS) {
                     consecutive_silence_skips++;
@@ -1717,12 +1766,25 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                                 chunk_rms, threshold, chunk_idx,
                                 consecutive_silence_skips);
                     }
+                    if (silent_run_start < 0) silent_run_start = chunk_start;
+                    silent_run_sec += (double)chunk_len / QWEN_SAMPLE_RATE;
+                    if (!pause_reset_done && pause_reset_sec > 0 && held_text_tokens == 0 &&
+                        silent_run_sec >= pause_reset_sec &&
+                        (n_raw_tokens > 0 || n_enc_cache > enc_cache_start)) {
+                        STREAM_PAUSE_RESET();
+                    }
                     ctx->perf_total_ms += get_time_ms() - chunk_t0;
                     chunk_idx++;
                     continue;
                 }
                 if (!is_flush) consecutive_silence_skips = 0;
             }
+        }
+
+        if (!is_flush) {
+            silent_run_sec = 0;
+            silent_run_start = -1;
+            pause_reset_done = 0;
         }
 
         /* Encoder path:
@@ -2448,6 +2510,13 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                                           &enc_cached_seq_total,
                                           QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
                     did_periodic_reset = 1;
+                }
+                /* A flushed silent chunk can already be a long enough pause
+                 * (with 4 s chunks a single one is). */
+                if (is_flush && !did_periodic_reset && !recovery_reset && !quiet_reset &&
+                    !pause_reset_done && pause_reset_sec > 0 &&
+                    silent_run_sec >= pause_reset_sec) {
+                    STREAM_PAUSE_RESET();
                 }
                 if (quiet_reset && !did_periodic_reset && !recovery_reset) {
                     /* Keep only the language header the model produced, so
