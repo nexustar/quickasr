@@ -1795,15 +1795,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int is_final = live ? (live_eof && audio_cursor >= audio_n_samples)
                             : (audio_cursor >= audio_n_samples);
 
-        /* Stream-mode silence skip: when --skip-silence is on, drop the
-         * encoder/decoder/emit work for chunks whose RMS sits below an
-         * adaptive threshold computed from recent chunk RMS values
-         * (P25 × ratio, mirrors compact_silence). Samples remain in the
-         * local buffer so future complete encoder windows still see them
-         * intact -- only the per-chunk emit cycle is short-circuited.
-         * Capped at QWEN_STREAM_MAX_SILENCE_SKIPS in a row so any pending
-         * decoder/text state still gets flushed during very long pauses. */
-        if (ctx->skip_silence && !is_final && !is_flush && live) {
+        chunk_no_speech = 0;
+        if (!is_final && !is_flush) {
             int64_t chunk_start = audio_cursor - chunk_samples;
             if (chunk_start < 0) chunk_start = 0;
             int64_t chunk_local_off = chunk_start - local_base_sample;
@@ -1812,38 +1805,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             if (chunk_local_off >= 0 &&
                 chunk_local_off + chunk_len <= local_n_samples &&
                 chunk_len > 0) {
-                float energy = 0.0f;
-                for (int64_t i = 0; i < chunk_len; i++) {
-                    float v = audio_samples[chunk_local_off + i];
-                    energy += v * v;
-                }
-                float chunk_rms = sqrtf(energy / (float)chunk_len);
-
-                rms_hist[rms_hist_pos] = chunk_rms;
-                rms_hist_pos = (rms_hist_pos + 1) % QWEN_STREAM_RMS_HIST_LEN;
-                if (rms_hist_count < QWEN_STREAM_RMS_HIST_LEN) rms_hist_count++;
-
-                float threshold;
-                if (rms_hist_count < 4) {
-                    threshold = QWEN_STREAM_SILENCE_BASE_RMS;
-                } else {
-                    float sorted[QWEN_STREAM_RMS_HIST_LEN];
-                    memcpy(sorted, rms_hist,
-                           (size_t)rms_hist_count * sizeof(float));
-                    qsort(sorted, (size_t)rms_hist_count, sizeof(float),
-                          cmp_float_asc);
-                    float p25 = sorted[rms_hist_count / 4];
-                    threshold = p25 * QWEN_STREAM_SILENCE_RATIO;
-                    if (threshold < QWEN_STREAM_SILENCE_BASE_RMS) {
-                        threshold = QWEN_STREAM_SILENCE_BASE_RMS;
-                    }
-                    if (threshold > QWEN_STREAM_SILENCE_MAX_RMS) {
-                        threshold = QWEN_STREAM_SILENCE_MAX_RMS;
-                    }
-                }
-
+                /* Pause test, run on every chunk: the stall reset needs to
+                 * know whether a chunk had speech at all. */
                 int had_speech = 0;
-                chunk_no_speech = 0;
                 int last_speech = -1;
                 int run = 0;
                 double gap_max = 0;           /* longest pause that ended in this chunk */
@@ -1883,45 +1847,89 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 } else {
                     trail_sil_sec += (double)chunk_len / QWEN_SAMPLE_RATE;
                 }
-                /* A pause that fell between two chunk boundaries is seen
-                 * only once speech resumes; reset before decoding it. */
-                if (had_speech && gap_max >= pause_reset_sec && pause_reset_sec > 0 &&
-                    !pause_reset_done && held_text_tokens == 0 &&
-                    (n_raw_tokens > 0 || n_enc_cache > enc_cache_start)) {
-                    STREAM_PAUSE_RESET();
-                }
-                if (had_speech) pause_reset_done = 0;
                 chunk_no_speech = (sp_thr > 0 && !had_speech);
-                silent_run_sec = trail_sil_sec;
-                if (qwen_verbose >= 2 && sp_thr > 0)
-                    fprintf(stderr, "  Pause test: trailing %.2fs (speech > %.5f)\n",
-                            trail_sil_sec, sp_thr);
 
-                if (trail_sil_sec >= QWEN_STREAM_EP_SEC && held_text_tokens > 0 &&
-                    ctx->stream_idle_flush_ms > 0) {
-                    /* The speaker has paused: decode now so the held tail
-                     * comes out, not when speech resumes. */
-                    is_flush = 1;
-                } else if (chunk_rms < threshold &&
-                    consecutive_silence_skips < QWEN_STREAM_MAX_SILENCE_SKIPS) {
-                    consecutive_silence_skips++;
-                    if (qwen_verbose >= 2) {
-                        fprintf(stderr,
-                                "  Silence skip: rms=%.5f thresh=%.5f "
-                                "(chunk %d, run=%d)\n",
-                                chunk_rms, threshold, chunk_idx,
-                                consecutive_silence_skips);
+                /* Stream-mode silence skip: when --skip-silence is on, drop
+                 * the encoder/decoder/emit work for chunks whose RMS sits
+                 * below an adaptive threshold computed from recent chunk RMS
+                 * values (P25 × ratio, mirrors compact_silence). Samples
+                 * remain in the local buffer so future complete encoder
+                 * windows still see them intact -- only the per-chunk emit
+                 * cycle is short-circuited. Capped at
+                 * QWEN_STREAM_MAX_SILENCE_SKIPS in a row so any pending
+                 * decoder/text state still gets flushed during very long
+                 * pauses. The flush and the pause reset hang off the same
+                 * live, skip-silence path. */
+                if (ctx->skip_silence && live) {
+                    float energy = 0.0f;
+                    for (int64_t i = 0; i < chunk_len; i++) {
+                        float v = audio_samples[chunk_local_off + i];
+                        energy += v * v;
                     }
-                    if (!pause_reset_done && pause_reset_sec > 0 && held_text_tokens == 0 &&
-                        silent_run_sec >= pause_reset_sec &&
+                    float chunk_rms = sqrtf(energy / (float)chunk_len);
+
+                    rms_hist[rms_hist_pos] = chunk_rms;
+                    rms_hist_pos = (rms_hist_pos + 1) % QWEN_STREAM_RMS_HIST_LEN;
+                    if (rms_hist_count < QWEN_STREAM_RMS_HIST_LEN) rms_hist_count++;
+
+                    float threshold;
+                    if (rms_hist_count < 4) {
+                        threshold = QWEN_STREAM_SILENCE_BASE_RMS;
+                    } else {
+                        float sorted[QWEN_STREAM_RMS_HIST_LEN];
+                        memcpy(sorted, rms_hist,
+                               (size_t)rms_hist_count * sizeof(float));
+                        qsort(sorted, (size_t)rms_hist_count, sizeof(float),
+                              cmp_float_asc);
+                        float p25 = sorted[rms_hist_count / 4];
+                        threshold = p25 * QWEN_STREAM_SILENCE_RATIO;
+                        if (threshold < QWEN_STREAM_SILENCE_BASE_RMS) {
+                            threshold = QWEN_STREAM_SILENCE_BASE_RMS;
+                        }
+                        if (threshold > QWEN_STREAM_SILENCE_MAX_RMS) {
+                            threshold = QWEN_STREAM_SILENCE_MAX_RMS;
+                        }
+                    }
+
+                    /* A pause that fell between two chunk boundaries is seen
+                     * only once speech resumes; reset before decoding it. */
+                    if (had_speech && gap_max >= pause_reset_sec && pause_reset_sec > 0 &&
+                        !pause_reset_done && held_text_tokens == 0 &&
                         (n_raw_tokens > 0 || n_enc_cache > enc_cache_start)) {
                         STREAM_PAUSE_RESET();
                     }
-                    ctx->perf_total_ms += get_time_ms() - chunk_t0;
-                    chunk_idx++;
-                    continue;
+                    if (had_speech) pause_reset_done = 0;
+                    silent_run_sec = trail_sil_sec;
+                    if (qwen_verbose >= 2 && sp_thr > 0)
+                        fprintf(stderr, "  Pause test: trailing %.2fs (speech > %.5f)\n",
+                                trail_sil_sec, sp_thr);
+
+                    if (trail_sil_sec >= QWEN_STREAM_EP_SEC && held_text_tokens > 0 &&
+                        ctx->stream_idle_flush_ms > 0) {
+                        /* The speaker has paused: decode now so the held tail
+                         * comes out, not when speech resumes. */
+                        is_flush = 1;
+                    } else if (chunk_rms < threshold &&
+                        consecutive_silence_skips < QWEN_STREAM_MAX_SILENCE_SKIPS) {
+                        consecutive_silence_skips++;
+                        if (qwen_verbose >= 2) {
+                            fprintf(stderr,
+                                    "  Silence skip: rms=%.5f thresh=%.5f "
+                                    "(chunk %d, run=%d)\n",
+                                    chunk_rms, threshold, chunk_idx,
+                                    consecutive_silence_skips);
+                        }
+                        if (!pause_reset_done && pause_reset_sec > 0 && held_text_tokens == 0 &&
+                            silent_run_sec >= pause_reset_sec &&
+                            (n_raw_tokens > 0 || n_enc_cache > enc_cache_start)) {
+                            STREAM_PAUSE_RESET();
+                        }
+                        ctx->perf_total_ms += get_time_ms() - chunk_t0;
+                        chunk_idx++;
+                        continue;
+                    }
+                    if (!is_flush) consecutive_silence_skips = 0;
                 }
-                if (!is_flush) consecutive_silence_skips = 0;
             }
         }
 
@@ -2353,10 +2361,15 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         }
 
         int n_raw_new = n_prefix_tokens_full + n_chunk_tokens;
-        if (!is_final && n_raw_new > 0 && n_raw_new <= n_raw_tokens) {
-            quiet_chunks++;
-        } else {
-            quiet_chunks = 0;
+        /* A stall is a pinned text prefix keeping the decoder silent while
+         * someone speaks. Chunks without speech neither count nor break it;
+         * without past text there is no prefix to blame. */
+        if (!chunk_no_speech) {
+            if (!is_final && ctx->past_text_conditioning &&
+                n_raw_new > 0 && n_raw_new <= n_raw_tokens)
+                quiet_chunks++;
+            else
+                quiet_chunks = 0;
         }
         int quiet_reset = (warmed_up && quiet_chunks >= QWEN_STREAM_QUIET_RESET_CHUNKS);
         if (n_raw_new > raw_tokens_cap) {
