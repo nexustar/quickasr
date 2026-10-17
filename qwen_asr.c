@@ -1061,8 +1061,12 @@ char *qwen_transcribe_audio(qwen_ctx_t *ctx, const float *samples, int n_samples
             (int)(unsigned char)seg_text[cut_pos]);
         size_t need = result_len + add_len + (size_t)(need_space ? 2 : 1);
         if (need > result_cap) {
-            while (need > result_cap) result_cap *= 2;
-            result = (char *)realloc(result, result_cap);
+            size_t cap = result_cap;
+            while (need > cap) cap *= 2;
+            char *grown = (char *)realloc(result, cap);
+            if (!grown) { free(seg_text); continue; }
+            result = grown;
+            result_cap = cap;
         }
         if (need_space) {
             result[result_len++] = ' ';
@@ -2602,12 +2606,16 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     size_t plen = strlen(piece);
                     if (ctx->stream_update_cb) stream_str_append(&upd_commit, piece, plen);
                     if (result_len + plen + 1 > result_cap) {
-                        while (result_len + plen + 1 > result_cap) result_cap *= 2;
-                        result = (char *)realloc(result, result_cap);
+                        size_t cap = result_cap;
+                        while (result_len + plen + 1 > cap) cap *= 2;
+                        char *grown = (char *)realloc(result, cap);
+                        if (grown) { result = grown; result_cap = cap; }
                     }
-                    memcpy(result + result_len, piece, plen);
-                    result_len += plen;
-                    result[result_len] = '\0';
+                    if (result_len + plen + 1 <= result_cap) {
+                        memcpy(result + result_len, piece, plen);
+                        result_len += plen;
+                        result[result_len] = '\0';
+                    }
                     ctx->perf_text_tokens++;
 
                     if (n_emitted_text_tokens == emitted_text_cap) {
