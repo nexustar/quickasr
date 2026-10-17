@@ -1130,6 +1130,23 @@ static void stream_clear_enc_cache(stream_enc_window_t *enc_cache,
     *next_window_start = new_start_sample;
 }
 
+/* Drop the oldest cached encoder windows until at most `keep` remain. */
+static int stream_trim_enc_cache(stream_enc_window_t *enc_cache,
+                                 int n_enc_cache,
+                                 int *enc_cache_start,
+                                 int *enc_cached_seq_total,
+                                 int keep) {
+    int evicted = 0;
+    while (n_enc_cache - *enc_cache_start > keep) {
+        *enc_cached_seq_total -= enc_cache[*enc_cache_start].seq_len;
+        free(enc_cache[*enc_cache_start].enc_output);
+        enc_cache[*enc_cache_start].enc_output = NULL;
+        (*enc_cache_start)++;
+        evicted++;
+    }
+    return evicted;
+}
+
 /* Re-anchor stream text state to a short committed tail so decoding can
  * continue after a hard reset without replaying the full text history. */
 static int stream_reanchor_text_state(qwen_ctx_t *ctx,
@@ -1317,6 +1334,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     #define QWEN_STREAM_STALE_CHUNKS 4
     #define QWEN_STREAM_RESET_INTERVAL_CHUNKS 45
     #define QWEN_STREAM_RESET_CARRY_TOKENS 24
+    /* A periodic reset keeps this many completed encoder windows, so the
+     * carried text keeps the audio it came from; without it the decoder
+     * tends to end its turn on every chunk until the next reset. */
+    #define QWEN_STREAM_RESET_KEEP_ENC_WINDOWS 1
     /* Stream-mode silence skip: chunks whose RMS sits below an adaptive
      * threshold (P25 of recent chunk RMS × ratio) are skipped past the
      * encoder/decoder/emit work. Mirrors compact_silence's offline gating. */
@@ -1686,14 +1707,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             /* Evict old encoder windows beyond the sliding-window limit
              * to keep decoder sequence length (and KV cache) bounded. */
             {
-                int evicted = 0;
-                while (n_enc_cache - enc_cache_start > QWEN_STREAM_MAX_ENC_WINDOWS) {
-                    enc_cached_seq_total -= enc_cache[enc_cache_start].seq_len;
-                    free(enc_cache[enc_cache_start].enc_output);
-                    enc_cache[enc_cache_start].enc_output = NULL;
-                    enc_cache_start++;
-                    evicted++;
-                }
+                int evicted = stream_trim_enc_cache(enc_cache, n_enc_cache,
+                                                    &enc_cache_start,
+                                                    &enc_cached_seq_total,
+                                                    QWEN_STREAM_MAX_ENC_WINDOWS);
                 if (evicted && qwen_monitor) {
                     fprintf(stderr, "\xe2\x9f\xb3");  /* ⟳ = window eviction */
                     fflush(stderr);
@@ -2152,12 +2169,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                         n_stable_text_tokens = 0;
                     }
                     prev_prefill_len = 0;
-                    stream_clear_enc_cache(enc_cache,
-                                           &n_enc_cache,
-                                           &enc_cache_start,
-                                           &enc_cached_seq_total,
-                                           &next_window_start,
-                                           full_end);
+                    stream_trim_enc_cache(enc_cache, n_enc_cache,
+                                          &enc_cache_start,
+                                          &enc_cached_seq_total,
+                                          QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
                     did_periodic_reset = 1;
                 }
             }
