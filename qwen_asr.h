@@ -330,6 +330,7 @@ void qwen_decoder_prefill(qwen_ctx_t *ctx, const float *input_embeds, int seq_le
 
 /* Decoder forward (single token, uses KV cache, returns greedy token) */
 int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed);
+int qwen_decoder_next_excluding(qwen_ctx_t *ctx, int excl);
 
 /* Global verbose flag */
 extern int qwen_verbose;

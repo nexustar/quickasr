@@ -542,6 +542,17 @@ int qwen_argmax_matvec_bf16(const float *x, const uint16_t *W_bf16,
     return best;
 }
 
+int qwen_argmax_matvec_bf16_excl(const float *x, const uint16_t *W_bf16,
+                                  int in_dim, int out_dim, int excl) {
+    int b1 = -1, b2 = -1;
+    float v1 = 0, v2 = 0;
+    if (excl > 0) argmax_bf16_range(x, W_bf16, in_dim, 0, excl, &b1, &v1);
+    if (excl + 1 < out_dim) argmax_bf16_range(x, W_bf16, in_dim, excl + 1, out_dim, &b2, &v2);
+    if (b1 < 0) return b2;
+    if (b2 < 0) return b1;
+    return v2 > v1 ? b2 : b1;
+}
+
 void qwen_matmul_t_bf16(float *C, const float *A, const uint16_t *B_bf16,
                          int M, int K, int N) {
     if (M == 1) {

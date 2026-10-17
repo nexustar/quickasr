@@ -385,6 +385,9 @@ static void ensure_dec_buffers(qwen_ctx_t *ctx) {
     ctx->dec_rope_sin = (float *)malloc(head_dim * sizeof(float));
 }
 
+/* Final hidden state of the last decoder step, for qwen_decoder_next_excluding. */
+static const float *decoder_last_x = NULL;
+
 int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
     qwen_decoder_t *dec = &ctx->decoder;
     const qwen_config_t *cfg = &ctx->config;
@@ -472,5 +475,13 @@ int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
 
     /* Final norm + streaming argmax (no logits buffer needed) */
     qwen_rms_norm(x, x, dec->norm, 1, dim, eps);
+    decoder_last_x = x;
     return qwen_argmax_matvec_bf16(x, dec->tok_embeddings_bf16, dim, cfg->vocab_size);
+}
+
+/* The most likely next token other than `excl`, for the step just run. */
+int qwen_decoder_next_excluding(qwen_ctx_t *ctx, int excl) {
+    if (!decoder_last_x) return excl;
+    return qwen_argmax_matvec_bf16_excl(decoder_last_x, ctx->decoder.tok_embeddings_bf16,
+                                        ctx->config.dec_hidden, ctx->config.vocab_size, excl);
 }

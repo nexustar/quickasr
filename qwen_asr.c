@@ -1384,6 +1384,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      * carried text keeps the audio it came from; without it the decoder
      * tends to end its turn on every chunk until the next reset. */
     #define QWEN_STREAM_RESET_KEEP_ENC_WINDOWS 1
+    /* A pinned text prefix can make the decoder end its turn on every
+     * chunk; after this many chunks without a new token, drop it. */
+    #define QWEN_STREAM_QUIET_RESET_CHUNKS 4
+    /* MIN_SCORE 6 is three net matching tokens. */
+    #define QWEN_STREAM_STITCH_TAIL 48
+    #define QWEN_STREAM_STITCH_MIN_SCORE 6
     /* Stream-mode silence skip: chunks whose RMS sits below an adaptive
      * threshold (P25 of recent chunk RMS × ratio) are skipped past the
      * encoder/decoder/emit work. Mirrors compact_silence's offline gating. */
@@ -1464,9 +1470,25 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int n_emitted_text_tokens = 0;
     int emitted_text_cap = 8192;
     int stagnant_chunks = 0;
-    /* Raw tokens [0, min_prefix_raw) have been emitted. They stay in the
-     * decoder prefix from then on: text already written out cannot be
-     * revised, so the decoder must not be free to re-decode it. */
+    int quiet_chunks = 0;
+    /* Loop break while decoding. The 1.7B model gets past a loop with its
+     * runner-up token; the 0.6B model only varies the loop, so its step
+     * ends instead. Five copies for 0.6B spare a spoken "はいはいはいはい". */
+    int big_model = ctx->config.dec_hidden > 1024;
+    int loop_break_reps = big_model ? 4 : 5;
+    int loop_nudges = big_model ? 1 : 0;
+    int loop_break_prev_chunk = 0;
+    /* A restart that keeps audio re-decodes text already emitted; the next
+     * text is aligned to it (stitch_pending), after a loop recovery once
+     * there is enough of it (stitch_hold). */
+    int stitch_pending = 0;
+    int stitch_hold = 0;
+    int stitch_tries = 0;
+    int last_recovery_chunk = -1000;
+    /* Raw tokens [0, min_prefix_raw) have been emitted, or after a restart
+     * are a new decode of emitted text (the alignment skipped them). They
+     * stay in the decoder prefix from then on: text already written out
+     * cannot be revised, so the decoder must not be free to re-decode it. */
     int min_prefix_raw = 0;
     int held_text_tokens = 0;        /* decoded on the last chunk, not yet emitted */
     int64_t idle_seen_samples = -1;  /* live sample count when last seen to grow */
@@ -2016,6 +2038,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             continue;
         }
         int n_chunk_tokens = 0;
+        int loop_breaks = 0;
+        int force_recovery = 0;
 
         while (n_generated < max_new_tokens) {
             n_generated++;
@@ -2025,7 +2049,34 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
 
             tok_embed_bf16_to_f32(tmp_embed, ctx->decoder.tok_embeddings_bf16, token, dim);
             token = qwen_decoder_forward(ctx, tmp_embed);
+
+            if (token != QWEN_TOKEN_ENDOFTEXT && token != QWEN_TOKEN_IM_END) {
+                int lb[64];
+                int ln = 0;
+                int from_prefix = 64 - n_chunk_tokens;
+                if (from_prefix > n_prefix_tokens_full) from_prefix = n_prefix_tokens_full;
+                for (int q = n_prefix_tokens_full - from_prefix; q < n_prefix_tokens_full && q >= 0; q++)
+                    lb[ln++] = raw_tokens[q];
+                int from_chunk = n_chunk_tokens < 64 - ln ? n_chunk_tokens : 64 - ln;
+                for (int q = n_chunk_tokens - from_chunk; q < n_chunk_tokens; q++)
+                    lb[ln++] = chunk_tokens[q];
+                int lp = 0;
+                int lr = stream_tail_repeat_blocks(lb, ln, 16, &lp);
+                if (lp > 0 && lr >= (lp == 1 ? 2 * loop_break_reps : loop_break_reps) &&
+                    token == lb[ln - lp]) {
+                    if (loop_breaks >= loop_nudges || loop_break_prev_chunk) {
+                        /* The recovery reset takes over. */
+                        force_recovery = 1;
+                        break;
+                    }
+                    token = qwen_decoder_next_excluding(ctx, token);
+                    loop_breaks++;
+                }
+            }
         }
+        if (loop_breaks > 0 && qwen_verbose >= 2)
+            fprintf(stderr, "  Loop reset applied (%d)\n", loop_breaks);
+        loop_break_prev_chunk = (loop_breaks > 0 && !force_recovery);
 
         double decode_ms = get_time_ms() - t0;
         ctx->perf_decode_ms += decode_ms;
@@ -2083,6 +2134,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         }
 
         int n_raw_new = n_prefix_tokens_full + n_chunk_tokens;
+        if (!is_final && n_raw_new > 0 && n_raw_new <= n_raw_tokens) {
+            quiet_chunks++;
+        } else {
+            quiet_chunks = 0;
+        }
+        int quiet_reset = (warmed_up && quiet_chunks >= QWEN_STREAM_QUIET_RESET_CHUNKS);
         if (n_raw_new > raw_tokens_cap) {
             while (n_raw_new > raw_tokens_cap) raw_tokens_cap *= 2;
             int *tmp_raw = (int *)realloc(raw_tokens, (size_t)raw_tokens_cap * sizeof(int));
@@ -2129,7 +2186,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
          *   streaming still advances,
          * - final chunk: emit everything. */
         int candidate_len = 0;
-        if (is_final || is_flush) {
+        if (is_final || is_flush || quiet_reset) {
             candidate_len = n_text_tokens;
         } else if (warmed_up) {
             candidate_len = n_text_tokens - rollback;
@@ -2143,6 +2200,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             if (emitted_text > n_text_tokens) emitted_text = n_text_tokens;
             if (candidate_len < emitted_text) candidate_len = emitted_text;
         }
+
+        if (stitch_pending && n_emitted_text_tokens == 0) stitch_pending = 0;
 
         /* Streaming commit: emit token delta against the previous candidate.
          * We do not attempt monotonic byte-level reconciliation here. */
@@ -2161,7 +2220,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 stagnant_chunks = 0;
             }
             int recovery_reset = 0;
-            if (tail_period > 0 && tail_reps >= QWEN_STREAM_DEGEN_MIN_REPEATS) {
+            /* A speaker repeating a word four times is common; a model
+             * stuck in a loop also runs into the token limit. */
+            if (tail_period > 0 && tail_reps >= QWEN_STREAM_DEGEN_MIN_REPEATS &&
+                n_generated >= max_new_tokens) {
                 recovery_reset = 1;
             }
             if (stagnant_chunks >= QWEN_STREAM_STALE_CHUNKS) {
@@ -2170,39 +2232,31 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             if (dropped_repeat_tokens >= 8) {
                 recovery_reset = 1;
             }
+            if (force_recovery) {
+                recovery_reset = 1;
+            }
+            if (recovery_reset && qwen_verbose >= 2) {
+                fprintf(stderr, "  Recovery cause: tail %dx%d stagnant %d dropped %d%s\n",
+                        tail_reps, tail_period, stagnant_chunks, dropped_repeat_tokens,
+                        force_recovery ? " loop break" : "");
+            }
 
-            if (recovery_reset) {
-                if (stream_reanchor_text_state(ctx,
-                                               emitted_text_tokens,
-                                               n_emitted_text_tokens,
-                                               QWEN_STREAM_RESET_CARRY_TOKENS,
-                                               &raw_tokens, &raw_tokens_cap, &n_raw_tokens,
-                                               &stable_text_tokens, &stable_text_cap,
-                                               &n_stable_text_tokens) != 0) {
-                    n_raw_tokens = 0;
-                    n_stable_text_tokens = 0;
+            if (recovery_reset && tail_period > 0 &&
+                (tail_reps >= QWEN_STREAM_DEGEN_MIN_REPEATS || (force_recovery && tail_reps >= 3))) {
+                /* Emit what precedes the loop with one copy of it. Loops
+                 * nest ("ああああ。ああああ。"), so cut repeatedly. */
+                int reps = tail_reps, period = tail_period;
+                for (int pass = 0; pass < 8 && period > 0 && reps >= 3; pass++) {
+                    int cut = candidate_len - (reps - 1) * period;
+                    candidate_len = cut > 0 ? cut : 0;
+                    reps = stream_tail_repeat_blocks(candidate_tokens, candidate_len,
+                                                     QWEN_STREAM_DEGEN_MAX_PERIOD, &period);
                 }
-                min_prefix_raw = n_raw_tokens > rollback ? n_raw_tokens - rollback : 0;
-                held_text_tokens = 0;
-                prev_prefill_len = 0;
-                stream_clear_enc_cache(enc_cache,
-                                       &n_enc_cache,
-                                       &enc_cache_start,
-                                       &enc_cached_seq_total,
-                                       &next_window_start,
-                                       full_end);
-                stagnant_chunks = 0;
-                did_recovery_reset = 1;
-                if (ctx->stream_update_cb && upd_last_tail.len > 0) {
-                    /* The held tokens were discarded with the reset. */
-                    ctx->stream_update_cb("", "", ctx->stream_update_cb_userdata);
-                    upd_last_tail.len = 0;
-                }
-                if (qwen_monitor) {
-                    fprintf(stderr, "!");
-                    fflush(stderr);
-                }
-            } else {
+            }
+            /* After a loop recovery, wait for enough new text to align on. */
+            if (stitch_pending && stitch_hold && !recovery_reset && !is_final && !is_flush &&
+                candidate_len < 8 && chunk_idx - last_recovery_chunk <= 4) candidate_len = 0;
+            {
                 if (candidate_len > stable_text_cap) {
                     while (candidate_len > stable_text_cap) stable_text_cap *= 2;
                     int *tmp_stable = (int *)realloc(stable_text_tokens,
@@ -2224,7 +2278,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     stable_text_tokens[i] = candidate_tokens[i];
                 }
 
-                int emit_start = lcp;
+                /* Nothing has been emitted since the restart. */
+                int emit_start = stitch_pending ? 0 : lcp;
                 if (emit_start < candidate_len && n_emitted_text_tokens > 0) {
                     int max_overlap = candidate_len - emit_start;
                     if (max_overlap > n_emitted_text_tokens) max_overlap = n_emitted_text_tokens;
@@ -2238,6 +2293,51 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                             break;
                         }
                     }
+                }
+
+                if (stitch_pending && candidate_len > 0) {
+                    /* Align a suffix of the emitted text with a prefix of
+                     * the new text, so rewording ("3000個" / "三千個") and a
+                     * looped copy at the end still match. */
+                    enum { ST_T = QWEN_STREAM_STITCH_TAIL, ST_C = 160 };
+                    static int st[ST_T + 1][ST_C + 1];
+                    int tn = n_emitted_text_tokens < ST_T ? n_emitted_text_tokens : ST_T;
+                    const int *tail = emitted_text_tokens + (n_emitted_text_tokens - tn);
+                    int cm = candidate_len < ST_C ? candidate_len : ST_C;
+                    for (int x = 0; x <= tn; x++) st[x][0] = 0;       /* free start in the tail */
+                    for (int y = 1; y <= cm; y++) st[0][y] = -y;
+                    for (int x = 1; x <= tn; x++) {
+                        for (int y = 1; y <= cm; y++) {
+                            int d = st[x - 1][y - 1] +
+                                    (tail[x - 1] == candidate_tokens[y - 1] ? 2 : -1);
+                            int u = st[x - 1][y] - 1;
+                            int l = st[x][y - 1] - 1;
+                            int b = d > u ? d : u;
+                            st[x][y] = b > l ? b : l;
+                        }
+                    }
+                    int best = 0, best_y = 0;                /* old part ends at best_y */
+                    for (int y = 1; y <= cm; y++) {
+                        if (st[tn][y] > best) { best = st[tn][y]; best_y = y; }
+                    }
+                    /* New text lying wholly inside the emitted text has
+                     * nothing new yet; decide on a later step. */
+                    int inside = 0;
+                    for (int x = 1; x <= tn; x++) if (st[x][cm] > inside) inside = st[x][cm];
+                    stitch_tries++;
+                    int undecided = (inside > best && inside >= QWEN_STREAM_STITCH_MIN_SCORE &&
+                                     !is_final && !is_flush && !recovery_reset &&
+                                     stitch_tries <= 4);
+                    if (inside > best && inside >= QWEN_STREAM_STITCH_MIN_SCORE) {
+                        best_y = cm;
+                        best = inside;
+                    }
+                    if (best >= QWEN_STREAM_STITCH_MIN_SCORE && best_y > emit_start) emit_start = best_y;
+                    if (qwen_verbose >= 2)
+                        fprintf(stderr, "  Stitch: score %d, skip %d of %d%s\n",
+                                best, emit_start, candidate_len, undecided ? " (undecided)" : "");
+                    if (undecided) emit_start = candidate_len;
+                    else stitch_pending = 0;
                 }
 
                 upd_commit.len = 0;
@@ -2325,7 +2425,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 }
 
                 int periodic_reset =
-                    (!is_final &&
+                    (!is_final && !recovery_reset &&
                      ctx->past_text_conditioning &&
                      chunk_idx >= unfixed_chunks &&
                      ((chunk_idx + 1) % QWEN_STREAM_RESET_INTERVAL_CHUNKS == 0));
@@ -2348,6 +2448,70 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                                           &enc_cached_seq_total,
                                           QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
                     did_periodic_reset = 1;
+                }
+                if (quiet_reset && !did_periodic_reset && !recovery_reset) {
+                    /* Keep only the language header the model produced, so
+                     * the restart does not re-detect (and switch) language. */
+                    n_raw_tokens = text_start;
+                    n_stable_text_tokens = 0;
+                    min_prefix_raw = text_start;
+                    held_text_tokens = 0;
+                    prev_prefill_len = 0;
+                    stream_clear_enc_cache(enc_cache,
+                                           &n_enc_cache,
+                                           &enc_cache_start,
+                                           &enc_cached_seq_total,
+                                           &next_window_start,
+                                           full_end);
+                    quiet_chunks = 0;
+                    /* The partial window is decoded again. */
+                    stitch_pending = 1;
+                    stitch_tries = 0;
+                    stitch_hold = 0;
+                    if (qwen_verbose >= 2) fprintf(stderr, "  Stall reset applied\n");
+                }
+            }
+            if (recovery_reset) {
+                /* Carry no text: the emitted tail is the loop itself. */
+                n_raw_tokens = text_start;
+                n_stable_text_tokens = 0;
+                min_prefix_raw = text_start;
+                held_text_tokens = 0;
+                prev_prefill_len = 0;
+                if (chunk_idx - last_recovery_chunk <= 4) {
+                    /* Second loop in a row on the same audio: drop it. */
+                    stream_clear_enc_cache(enc_cache,
+                                           &n_enc_cache,
+                                           &enc_cache_start,
+                                           &enc_cached_seq_total,
+                                           &next_window_start,
+                                           full_end);
+                    stitch_pending = 0;
+                    if (qwen_verbose >= 2) fprintf(stderr, "  Recovery mode: hard\n");
+                } else {
+                    /* Keep the last window so the words around the loop
+                     * are decoded again. */
+                    stream_trim_enc_cache(enc_cache, n_enc_cache,
+                                          &enc_cache_start,
+                                          &enc_cached_seq_total,
+                                          QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
+                    stitch_pending = 1;
+                    stitch_tries = 0;
+                    stitch_hold = 1;
+                    if (qwen_verbose >= 2) fprintf(stderr, "  Recovery mode: soft\n");
+                }
+                last_recovery_chunk = chunk_idx;
+                stagnant_chunks = 0;
+                quiet_chunks = 0;
+                did_recovery_reset = 1;
+                if (ctx->stream_update_cb && upd_last_tail.len > 0) {
+                    /* The held tokens were discarded with the reset. */
+                    ctx->stream_update_cb("", "", ctx->stream_update_cb_userdata);
+                    upd_last_tail.len = 0;
+                }
+                if (qwen_monitor) {
+                    fprintf(stderr, "!");
+                    fflush(stderr);
                 }
             }
         }

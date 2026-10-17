@@ -155,6 +155,9 @@ void qwen_apply_rope_neox(float *x, const float *cos_vals, const float *sin_vals
  * Returns the index of the row with highest dot product. */
 int qwen_argmax_matvec_bf16(const float *x, const uint16_t *W_bf16,
                              int in_dim, int out_dim);
+/* Same, ignoring row `excl`: the runner-up when `excl` was the winner. */
+int qwen_argmax_matvec_bf16_excl(const float *x, const uint16_t *W_bf16,
+                                  int in_dim, int out_dim, int excl);
 
 /* ========================================================================
  * Threading
