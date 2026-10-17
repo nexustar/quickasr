@@ -1593,6 +1593,17 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
 
     int chunk_idx = 0;
     int64_t audio_cursor = 0;
+    /* --stream-json: resets and recoveries go to stderr, one line each,
+     * stamped with the stream position. */
+#define STREAM_EVENT(...) do { \
+        if (ctx->stream_log) { \
+            fprintf(stderr, "[stream %.1fs] ", (double)audio_cursor / QWEN_SAMPLE_RATE); \
+            fprintf(stderr, __VA_ARGS__); \
+            fputc('\n', stderr); \
+        } \
+    } while (0)
+    char logged_lang[64] = "";
+    int64_t behind_logged_at = -1;
     int64_t decoded_cursor = 0;   /* audio_cursor at the last decoded step */
     /* Audio before this has all its text emitted. A reset that drops held
      * text (to decode it again) does not move it. */
@@ -1695,6 +1706,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         pause_reset_done = 1; \
         STREAM_RESET_DONE(); \
         if (qwen_verbose >= 2) fprintf(stderr, "  Pause reset applied\n"); \
+        STREAM_EVENT("pause reset"); \
     } while (0)
 
     int reset_interval_chunks =
@@ -1825,6 +1837,14 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         }
 
         double chunk_t0 = get_time_ms();
+        if (live && ctx->stream_log) {
+            double behind = (double)(audio_n_samples - audio_cursor) / QWEN_SAMPLE_RATE;
+            if (behind > 2.0 * ctx->stream_chunk_sec &&
+                (behind_logged_at < 0 || audio_cursor - behind_logged_at >= 30 * QWEN_SAMPLE_RATE)) {
+                STREAM_EVENT("%.1fs of input not decoded yet", behind);
+                behind_logged_at = audio_cursor;
+            }
+        }
         if (is_flush && audio_n_samples - audio_cursor < QWEN_SAMPLE_RATE / 5 &&
             audio_cursor > 0) {
             /* Under 200 ms of new audio: re-decode the same span to release
@@ -2344,6 +2364,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         }
         if (loop_breaks > 0 && qwen_verbose >= 2)
             fprintf(stderr, "  Loop reset applied (%d)\n", loop_breaks);
+        if (loop_breaks > 0 && !force_recovery)
+            STREAM_EVENT("loop broken with the runner-up token");
         loop_break_prev_chunk = (loop_breaks > 0 && !force_recovery);
 
         double decode_ms = get_time_ms() - t0;
@@ -2447,6 +2469,22 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 }
             }
             text_start = (asr_text_pos >= 0) ? asr_text_pos + 1 : 0;
+            if (ctx->stream_log && asr_text_pos > 0) {
+                char lang[64];
+                size_t ll = 0;
+                for (int i = 0; i < asr_text_pos; i++) {
+                    const char *pc = qwen_tokenizer_decode(tokenizer, raw_tokens[i]);
+                    size_t pl = strlen(pc);
+                    if (ll + pl >= sizeof(lang)) break;
+                    memcpy(lang + ll, pc, pl);
+                    ll += pl;
+                }
+                lang[ll] = 0;
+                if (strcmp(lang, logged_lang) != 0) {
+                    memcpy(logged_lang, lang, ll + 1);
+                    STREAM_EVENT("%s", lang);
+                }
+            }
         }
         if (text_start < 0) text_start = 0;
         if (text_start > n_raw_tokens) text_start = n_raw_tokens;
@@ -2528,6 +2566,31 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 fprintf(stderr, "  Recovery cause: tail %dx%d stagnant %d dropped %d%s\n",
                         tail_reps, tail_period, stagnant_chunks, dropped_repeat_tokens,
                         force_recovery ? " loop break" : "");
+            }
+            char recovery_why[192] = "";
+            if (recovery_reset && ctx->stream_log) {
+                int w = 0;
+                if (force_recovery)
+                    w = snprintf(recovery_why, sizeof(recovery_why), "loop while decoding");
+                else if (stagnant_chunks >= QWEN_STREAM_STALE_CHUNKS)
+                    w = snprintf(recovery_why, sizeof(recovery_why), "no progress");
+                else if (dropped_repeat_tokens >= 8)
+                    w = snprintf(recovery_why, sizeof(recovery_why), "repeated tokens");
+                else
+                    w = snprintf(recovery_why, sizeof(recovery_why), "loop of %d", tail_reps);
+                if (tail_period > 0 && tail_reps >= 2 && tail_period <= candidate_len) {
+                    w += snprintf(recovery_why + w, sizeof(recovery_why) - (size_t)w, ", \"");
+                    for (int q = candidate_len - tail_period; q < candidate_len; q++) {
+                        const char *pc = qwen_tokenizer_decode(tokenizer, candidate_tokens[q]);
+                        size_t room = sizeof(recovery_why) - (size_t)w - 2;
+                        size_t pl = strlen(pc);
+                        if (pl > room) break;
+                        memcpy(recovery_why + w, pc, pl);
+                        w += (int)pl;
+                    }
+                    recovery_why[w] = 0;
+                    snprintf(recovery_why + w, sizeof(recovery_why) - (size_t)w, "\"");
+                }
             }
 
             if (recovery_reset && tail_period > 0 &&
@@ -2761,6 +2824,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     STREAM_REALIGN(0);
                     STREAM_RESET_DONE();
                     did_periodic_reset = 1;
+                    STREAM_EVENT("periodic reset, no text kept (none of it punctuated)");
                 } else if (periodic_reset) {
                     if (stream_reanchor_text_state(ctx,
                                                    emitted_text_tokens,
@@ -2780,6 +2844,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     STREAM_RESET_AUDIO(QWEN_STREAM_RESET_KEEP_ENC_WINDOWS, 0);
                     STREAM_RESET_DONE();
                     did_periodic_reset = 1;
+                    STREAM_EVENT("periodic reset");
                 }
                 /* New words in a chunk with no speech frame: speech too
                  * quiet for the frame test (low-SNR radio, say). Not a pause. */
@@ -2805,6 +2870,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     STREAM_REALIGN(0);
                     STREAM_RESET_DONE();
                     if (qwen_verbose >= 2) fprintf(stderr, "  Stall reset applied\n");
+                    STREAM_EVENT("stall reset: %d steps without new text",
+                                 QWEN_STREAM_QUIET_RESET_CHUNKS);
                 }
             }
             if (recovery_reset) {
@@ -2815,12 +2882,14 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     STREAM_RESET_AUDIO(-1, full_end);
                     stitch_pending = 0;
                     if (qwen_verbose >= 2) fprintf(stderr, "  Recovery mode: hard\n");
+                    STREAM_EVENT("hard recovery (audio dropped): %s", recovery_why);
                 } else {
                     /* Keep the last window so the words around the loop
                      * are decoded again. */
                     STREAM_RESET_AUDIO(QWEN_STREAM_RESET_KEEP_ENC_WINDOWS, 0);
                     STREAM_REALIGN(1);
                     if (qwen_verbose >= 2) fprintf(stderr, "  Recovery mode: soft\n");
+                    STREAM_EVENT("recovery: %s", recovery_why);
                 }
                 last_recovery_chunk = chunk_idx;
                 STREAM_RESET_DONE();

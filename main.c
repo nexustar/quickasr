@@ -98,7 +98,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "                             or with --skip-silence quiet audio\n");
     fprintf(stderr, "  --stream-json              With --stream: print one JSON object per line,\n");
     fprintf(stderr, "                             {\"commit\":..., \"tail\":...}: commit is final text to\n");
-    fprintf(stderr, "                             append, tail is the provisional rest and replaces the last one\n");
+    fprintf(stderr, "                             append, tail is the provisional rest and replaces the\n");
+    fprintf(stderr, "                             last one. Resets and recoveries are logged to stderr\n");
     fprintf(stderr, "  --enc-window-sec <secs>    Encoder attention window in seconds (1..8, default 8)\n");
     fprintf(stderr, "  --past-text <yes|no|auto>  Reuse previously decoded text as context for the next\n");
     fprintf(stderr, "                             segment/chunk (continuity bias; auto=yes for --stream)\n");
@@ -277,6 +278,7 @@ int main(int argc, char **argv) {
     if (stream_json) {
         qwen_set_token_callback(ctx, NULL, NULL);
         qwen_set_stream_update_callback(ctx, stream_update_json, NULL);
+        ctx->stream_log = (verbosity >= 1);
     } else if (emit_tokens) qwen_set_token_callback(ctx, stream_token, NULL);
     else qwen_set_token_callback(ctx, NULL, NULL);
 

@@ -123,6 +123,16 @@ These limits activate automatically when the stream is long enough to exceed the
 
 `commit` is text that will not change; append it. `tail` is the model's current guess at what follows, including the rollback tokens that plain mode holds back and everything decoded during the first `unfixed_chunks`; it replaces the previous tail and can be rewritten or withdrawn. Show it for low latency, but split sentences on `commit` only: the tail routinely ends in a period that the next chunk takes back.
 
+With `--stream-json` (unless `--silent`) the stream also logs to stderr, one line per event, stamped with the position in the input: pause, stall and periodic resets, loop recoveries with their cause and the looping text, a loop broken with the runner-up token, the detected language when it changes, and, live, input waiting to be decoded when decoding falls behind:
+
+```
+[stream 4.0s] language Japanese
+[stream 32.0s] loop broken with the runner-up token
+[stream 68.0s] recovery: loop while decoding, "嬉しい"
+[stream 96.0s] pause reset
+[stream 128.0s] 12.0s of input not decoded yet
+```
+
 Default stream settings:
 - `chunk_size`: 2s (`--stream-chunk-sec`, range `1..8`)
 - `encoder_window`: 8s (`--enc-window-sec`, range `1..8`)

@@ -237,6 +237,7 @@ typedef struct {
                                     * is buffered and emit the held-back tail (default 800, 0=off) */
     int stream_pause_reset_ms;     /* live stream: after a pause this long, drop the text prefix and older
                                     * cached audio so the next speech starts clean (default 3000, 0=off) */
+    int stream_log;                /* stream: log resets, recoveries and language changes to stderr */
 
     /* Optional prompt/language controls */
     char *prompt;                  /* system prompt text (UTF-8) */
