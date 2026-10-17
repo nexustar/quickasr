@@ -398,6 +398,8 @@ float *qwen_mel_spectrogram(const float *samples, int n_samples, int *out_frames
  * ======================================================================== */
 
 #include <pthread.h>
+#include <unistd.h>
+#include <errno.h>
 
 /* Append n_new float samples to la->samples under mutex + signal condvar. */
 static void live_audio_append(qwen_live_audio_t *la, const float *data, int n_new) {
@@ -452,9 +454,12 @@ static void *live_reader_thread(void *arg) {
     int data_remaining = rctx->data_remaining;
     free(rctx);
 
-    /* Read stdin in ~2s chunks: 32000 samples * 2 bytes = 64000 bytes */
+    /* Hand over whatever is available, up to ~2s at a time (64000 bytes).
+     * fread() would wait for the full 2 s and hold back the audio before a
+     * pause. */
     const size_t READ_SIZE = 64000;
     uint8_t *buf = (uint8_t *)malloc(READ_SIZE);
+    size_t carry = 0;  /* 0 or 1: first byte of a sample split across reads */
     if (!buf) {
         pthread_mutex_lock(&la->mutex);
         la->eof = 1;
@@ -469,10 +474,15 @@ static void *live_reader_thread(void *arg) {
             if (data_remaining == 0) break;
             if (want > (size_t)data_remaining) want = (size_t)data_remaining;
         }
-        size_t n = fread(buf, 1, want, stdin);
-        if (n == 0) break;
-        if (is_wav && data_remaining >= 0) data_remaining -= (int)n;
-        live_audio_convert_and_append(la, buf, n);
+        ssize_t got = read(STDIN_FILENO, buf + carry, want - carry);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) break;
+        if (is_wav && data_remaining >= 0) data_remaining -= (int)got;
+        size_t n = carry + (size_t)got;
+        size_t whole = n & ~(size_t)1;
+        if (whole > 0) live_audio_convert_and_append(la, buf, whole);
+        carry = n - whole;
+        if (carry) buf[0] = buf[whole];
     }
 
     free(buf);
@@ -488,6 +498,8 @@ qwen_live_audio_t *qwen_live_audio_start_stdin(void) {
      * but a full WAV header is typically 44 bytes. Read up to 4096 to cover
      * any extended header chunks before the data chunk. */
     uint8_t header[4096];
+    /* Unbuffered, so stdio holds nothing back from the reader thread's read(). */
+    setvbuf(stdin, NULL, _IONBF, 0);
     size_t hdr_read = fread(header, 1, sizeof(header), stdin);
     if (hdr_read < 4) {
         fprintf(stderr, "qwen_live_audio_start_stdin: no data on stdin\n");
