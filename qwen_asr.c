@@ -1379,7 +1379,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     #define QWEN_STREAM_DEGEN_MAX_PERIOD 32
     #define QWEN_STREAM_DEGEN_MIN_REPEATS 4
     #define QWEN_STREAM_STALE_CHUNKS 4
-    #define QWEN_STREAM_RESET_INTERVAL_CHUNKS 45
+    /* Much longer and the 1.7B model drifts into writing no punctuation. */
+    #define QWEN_STREAM_RESET_INTERVAL_SEC 90.0
     #define QWEN_STREAM_RESET_CARRY_TOKENS 24
     /* A periodic reset keeps this many completed encoder windows, so the
      * carried text keeps the audio it came from; without it the decoder
@@ -1573,8 +1574,15 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         stitch_tries = 0; \
         stitch_hold = 0; \
         pause_reset_done = 1; \
+        last_trim_chunk = chunk_idx; \
         if (qwen_verbose >= 2) fprintf(stderr, "  Pause reset applied\n"); \
     } while (0)
+
+    int reset_interval_chunks =
+        (int)(QWEN_STREAM_RESET_INTERVAL_SEC / ctx->stream_chunk_sec + 0.5);
+    if (reset_interval_chunks < 4) reset_interval_chunks = 4;
+    /* The periodic trim counts from the last reset of any kind. */
+    int last_trim_chunk = -1;
 
     while (audio_cursor < audio_n_samples || (live && !live_eof)) {
         int is_flush = 0;
@@ -2490,8 +2498,37 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     (!is_final && !recovery_reset &&
                      ctx->past_text_conditioning &&
                      chunk_idx >= unfixed_chunks &&
-                     ((chunk_idx + 1) % QWEN_STREAM_RESET_INTERVAL_CHUNKS == 0));
-                if (periodic_reset) {
+                     chunk_idx - last_trim_chunk >= reset_interval_chunks);
+                /* Carried text without punctuation keeps the model writing
+                 * none (1.7B drifts into it); then carry no text. */
+                int periodic_no_text = 0;
+                if (periodic_reset && n_emitted_text_tokens >= QWEN_STREAM_RESET_CARRY_TOKENS) {
+                    int has_punct = 0;
+                    for (int q = n_emitted_text_tokens - QWEN_STREAM_RESET_CARRY_TOKENS;
+                         q < n_emitted_text_tokens && !has_punct; q++) {
+                        const char *pc = qwen_tokenizer_decode(tokenizer, emitted_text_tokens[q]);
+                        if (strstr(pc, "\xe3\x80\x82") || strstr(pc, "\xe3\x80\x81") ||   /* 。、 */
+                            strstr(pc, "\xef\xbc\x8c") || strstr(pc, "\xef\xbc\x9f") ||   /* ，？ */
+                            strstr(pc, "\xef\xbc\x81") || strpbrk(pc, ".,?!")) has_punct = 1; /* ！ */
+                    }
+                    periodic_no_text = !has_punct;
+                }
+                if (periodic_reset && periodic_no_text) {
+                    n_raw_tokens = text_start;
+                    n_stable_text_tokens = 0;
+                    min_prefix_raw = text_start;
+                    held_text_tokens = 0;
+                    prev_prefill_len = 0;
+                    stream_trim_enc_cache(enc_cache, n_enc_cache,
+                                          &enc_cache_start,
+                                          &enc_cached_seq_total,
+                                          QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
+                    stitch_pending = 1;
+                    stitch_tries = 0;
+                    stitch_hold = 0;
+                    did_periodic_reset = 1;
+                    last_trim_chunk = chunk_idx;
+                } else if (periodic_reset) {
                     if (stream_reanchor_text_state(ctx,
                                                    emitted_text_tokens,
                                                    n_emitted_text_tokens,
@@ -2502,7 +2539,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                         n_raw_tokens = 0;
                         n_stable_text_tokens = 0;
                     }
-                    min_prefix_raw = n_raw_tokens > rollback ? n_raw_tokens - rollback : 0;
+                    /* Carried tokens are already shown; left open they get
+                     * rewritten and both versions show. */
+                    min_prefix_raw = n_raw_tokens;
                     held_text_tokens = 0;
                     prev_prefill_len = 0;
                     stream_trim_enc_cache(enc_cache, n_enc_cache,
@@ -2510,6 +2549,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                                           &enc_cached_seq_total,
                                           QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
                     did_periodic_reset = 1;
+                    last_trim_chunk = chunk_idx;
                 }
                 /* A flushed silent chunk can already be a long enough pause
                  * (with 4 s chunks a single one is). */
@@ -2537,6 +2577,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     stitch_pending = 1;
                     stitch_tries = 0;
                     stitch_hold = 0;
+                    last_trim_chunk = chunk_idx;
                     if (qwen_verbose >= 2) fprintf(stderr, "  Stall reset applied\n");
                 }
             }
@@ -2570,6 +2611,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     if (qwen_verbose >= 2) fprintf(stderr, "  Recovery mode: soft\n");
                 }
                 last_recovery_chunk = chunk_idx;
+                last_trim_chunk = chunk_idx;
                 stagnant_chunks = 0;
                 quiet_chunks = 0;
                 did_recovery_reset = 1;
