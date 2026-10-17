@@ -85,7 +85,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -S <secs>     Segment target seconds (default: 0 = full-audio decode)\n");
     fprintf(stderr, "  -W <secs>     Segment-cutting silence search window ± seconds (default: 3.0)\n");
     fprintf(stderr, "  --stream      Streaming mode: process in chunks with prefix rollback\n");
-    fprintf(stderr, "  --stream-max-new-tokens <n>  Max generated tokens per stream step (default: 32)\n");
+    fprintf(stderr, "  --stream-max-new-tokens <n>  Max generated tokens per stream step (default: 32);\n");
+    fprintf(stderr, "                             a step covering more audio may write 10 per second\n");
     fprintf(stderr, "  --stream-chunk-sec <secs>  Streaming chunk size in seconds (1..8, default 2)\n");
     fprintf(stderr, "                             Raise on larger models / slower hardware if per-chunk\n");
     fprintf(stderr, "                             processing > chunk_sec (display latency grows over time)\n");

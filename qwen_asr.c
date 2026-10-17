@@ -1373,6 +1373,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      * grows unbounded (negligible memory) for correct text matching. */
     #define QWEN_STREAM_MAX_ENC_WINDOWS  4
     #define QWEN_STREAM_MIN_PARTIAL_SAMPLES 800   /* 50 ms */
+    #define QWEN_STREAM_TOKENS_PER_SEC 10.0
     #define QWEN_STREAM_MAX_PREFIX_TOKENS 150
     #define QWEN_STREAM_MAX_REPEAT_TOKEN_RUN 12
     #define QWEN_STREAM_OVERLAP_MAX_TOKENS 48
@@ -1531,6 +1532,14 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
 
     int chunk_idx = 0;
     int64_t audio_cursor = 0;
+    int64_t decoded_cursor = 0;   /* audio_cursor at the last decoded step */
+    /* After a restart that keeps audio, the next step decodes that audio
+     * again; it counts as new for the step's token limit. */
+#define STREAM_REDECODE_FROM_KEPT() do { \
+        decoded_cursor = (n_enc_cache > enc_cache_start) \
+            ? enc_cache[enc_cache_start].start_sample \
+            : (audio_cursor / enc_window_samples) * (int64_t)enc_window_samples; \
+    } while (0)
     stream_enc_window_t *enc_cache = NULL;
     int n_enc_cache = 0;
     int enc_cache_start = 0;  /* first live entry (older ones evicted) */
@@ -1574,6 +1583,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         stitch_pending = 1; \
         stitch_tries = 0; \
         stitch_hold = 0; \
+        STREAM_REDECODE_FROM_KEPT(); \
         pause_reset_done = 1; \
         last_trim_chunk = chunk_idx; \
         if (qwen_verbose >= 2) fprintf(stderr, "  Pause reset applied\n"); \
@@ -2104,8 +2114,18 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         t0 = get_time_ms();
         int n_generated = 0;
 
+        /* After skipped chunks or a restart that keeps audio, a step covers
+         * more than one chunk. */
+        int step_cap = max_new_tokens;
+        {
+            double new_sec = (double)(audio_cursor - decoded_cursor) / QWEN_SAMPLE_RATE;
+            int need = (int)(QWEN_STREAM_TOKENS_PER_SEC * new_sec + 0.5) + rollback;
+            if (need > step_cap) step_cap = need;
+        }
+        decoded_cursor = audio_cursor;
+
         /* Collect ALL generated tokens (including language, <asr_text>, etc.) */
-        int *chunk_tokens = (int *)malloc((size_t)max_new_tokens * sizeof(int));
+        int *chunk_tokens = (int *)malloc((size_t)step_cap * sizeof(int));
         if (!chunk_tokens) {
             ctx->perf_total_ms += get_time_ms() - chunk_t0;
             chunk_idx++;
@@ -2115,7 +2135,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int loop_breaks = 0;
         int force_recovery = 0;
 
-        while (n_generated < max_new_tokens) {
+        while (n_generated < step_cap) {
             n_generated++;
             if (token == QWEN_TOKEN_ENDOFTEXT || token == QWEN_TOKEN_IM_END) break;
 
@@ -2158,7 +2178,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             fprintf(stderr, "  Decode: %d tokens (%.0f ms, %.1f ms/token%s)\n",
                     n_generated, decode_ms,
                     n_generated > 0 ? decode_ms / n_generated : 0,
-                    (n_generated >= max_new_tokens &&
+                    (n_generated >= step_cap &&
                      token != QWEN_TOKEN_ENDOFTEXT &&
                      token != QWEN_TOKEN_IM_END) ? ", hit max_new" : "");
         if (qwen_monitor) {
@@ -2288,7 +2308,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                                                       QWEN_STREAM_DEGEN_MAX_PERIOD,
                                                       &tail_period);
             int candidate_advance = candidate_len - n_stable_text_tokens;
-            if (!is_final && n_generated >= max_new_tokens && candidate_advance <= 1) {
+            if (!is_final && n_generated >= step_cap && candidate_advance <= 1) {
                 stagnant_chunks++;
             } else {
                 stagnant_chunks = 0;
@@ -2297,7 +2317,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             /* A speaker repeating a word four times is common; a model
              * stuck in a loop also runs into the token limit. */
             if (tail_period > 0 && tail_reps >= QWEN_STREAM_DEGEN_MIN_REPEATS &&
-                n_generated >= max_new_tokens) {
+                n_generated >= step_cap) {
                 recovery_reset = 1;
             }
             if (stagnant_chunks >= QWEN_STREAM_STALE_CHUNKS) {
@@ -2530,6 +2550,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     stitch_pending = 1;
                     stitch_tries = 0;
                     stitch_hold = 0;
+                    STREAM_REDECODE_FROM_KEPT();
                     did_periodic_reset = 1;
                     last_trim_chunk = chunk_idx;
                 } else if (periodic_reset) {
@@ -2581,6 +2602,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     stitch_pending = 1;
                     stitch_tries = 0;
                     stitch_hold = 0;
+                    STREAM_REDECODE_FROM_KEPT();
                     last_trim_chunk = chunk_idx;
                     if (qwen_verbose >= 2) fprintf(stderr, "  Stall reset applied\n");
                 }
@@ -2612,6 +2634,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     stitch_pending = 1;
                     stitch_tries = 0;
                     stitch_hold = 1;
+                    STREAM_REDECODE_FROM_KEPT();
                     if (qwen_verbose >= 2) fprintf(stderr, "  Recovery mode: soft\n");
                 }
                 last_recovery_chunk = chunk_idx;
