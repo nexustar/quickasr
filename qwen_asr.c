@@ -845,6 +845,11 @@ static int stream_seam_needs_space(int prev_ch, const char *next) {
     return 1;
 }
 
+static int stream_sec_to_chunks(double sec, double chunk_sec) {
+    int n = (int)(sec / chunk_sec + 0.5);
+    return n < 1 ? 1 : n;
+}
+
 typedef struct {
     qwen_token_cb downstream_cb;
     void *downstream_userdata;
@@ -1406,6 +1411,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     #define QWEN_STREAM_OVERLAP_MIN_TOKENS 4
     #define QWEN_STREAM_DEGEN_MAX_PERIOD 32
     #define QWEN_STREAM_DEGEN_MIN_REPEATS 4
+    /* Steps at the token limit without progress before the recovery reset. */
     #define QWEN_STREAM_STALE_CHUNKS 4
     /* Much longer and the 1.7B model drifts into writing no punctuation. */
     #define QWEN_STREAM_RESET_INTERVAL_SEC 90.0
@@ -1415,8 +1421,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      * tends to end its turn on every chunk until the next reset. */
     #define QWEN_STREAM_RESET_KEEP_ENC_WINDOWS 1
     /* A pinned text prefix can make the decoder end its turn on every
-     * chunk; after this many chunks without a new token, drop it. */
+     * chunk; after this many decode steps without a new token, drop it. */
     #define QWEN_STREAM_QUIET_RESET_CHUNKS 4
+    /* A loop this soon after a recovery, within the window of audio the
+     * recovery kept, drops the audio; until then the alignment after a
+     * recovery may wait for more text. In seconds, rounded to chunks. */
+    #define QWEN_STREAM_RECOVERY_WINDOW_SEC 8.0
     /* MIN_SCORE 6 is three net matching tokens. */
     #define QWEN_STREAM_STITCH_TAIL 48
     #define QWEN_STREAM_STITCH_MIN_SCORE 6
@@ -1672,6 +1682,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int reset_interval_chunks =
         (int)(QWEN_STREAM_RESET_INTERVAL_SEC / ctx->stream_chunk_sec + 0.5);
     if (reset_interval_chunks < 4) reset_interval_chunks = 4;
+    int recovery_window_chunks = stream_sec_to_chunks(QWEN_STREAM_RECOVERY_WINDOW_SEC,
+                                                      ctx->stream_chunk_sec);
     /* The periodic trim counts from the last reset of any kind. */
     int last_trim_chunk = -1;
 
@@ -2491,7 +2503,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             }
             /* After a loop recovery, wait for enough new text to align on. */
             if (stitch_pending && stitch_hold && !recovery_reset && !is_final && !is_flush &&
-                candidate_len < 8 && chunk_idx - last_recovery_chunk <= 4) candidate_len = 0;
+                candidate_len < 8 && chunk_idx - last_recovery_chunk <= recovery_window_chunks) candidate_len = 0;
             {
                 if (candidate_len > stable_text_cap) {
                     while (candidate_len > stable_text_cap) stable_text_cap *= 2;
@@ -2563,7 +2575,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     stitch_tries++;
                     int undecided = (inside > best && inside >= QWEN_STREAM_STITCH_MIN_SCORE &&
                                      !is_final && !is_flush && !recovery_reset &&
-                                     stitch_tries <= 4);
+                                     stitch_tries <= recovery_window_chunks);
                     if (inside > best && inside >= QWEN_STREAM_STITCH_MIN_SCORE) {
                         best_y = cm;
                         best = inside;
@@ -2757,7 +2769,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             if (recovery_reset) {
                 /* Carry no text: the emitted tail is the loop itself. */
                 STREAM_RESET_TEXT(text_start);
-                if (chunk_idx - last_recovery_chunk <= 4) {
+                if (chunk_idx - last_recovery_chunk <= recovery_window_chunks) {
                     /* Second loop in a row on the same audio: drop it. */
                     STREAM_RESET_AUDIO(-1, full_end);
                     stitch_pending = 0;
