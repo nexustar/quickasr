@@ -845,6 +845,21 @@ static int stream_seam_needs_space(int prev_ch, const char *next) {
     return 1;
 }
 
+static int stream_piece_ends_sentence(const char *piece) {
+    size_t n = piece ? strlen(piece) : 0;
+    if (n == 0) return 0;
+    char c = piece[n - 1];
+    if (c == '.' || c == '!' || c == '?') return 1;
+    if (n >= 3) {
+        const char *t = piece + n - 3;
+        if (!memcmp(t, "\xe3\x80\x82", 3) ||       /* 。 */
+            !memcmp(t, "\xef\xbc\x81", 3) ||       /* ！ */
+            !memcmp(t, "\xef\xbc\x9f", 3) ||       /* ？ */
+            !memcmp(t, "\xef\xbc\x8e", 3)) return 1; /* ． */
+    }
+    return 0;
+}
+
 static int stream_sec_to_chunks(double sec, double chunk_sec) {
     int n = (int)(sec / chunk_sec + 0.5);
     return n < 1 ? 1 : n;
@@ -1614,6 +1629,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         min_prefix_raw = (keep_); \
         held_text_tokens = 0; \
         prev_prefill_len = 0; \
+        period_held = 0; \
     } while (0)
     /* Negative windows_: clear the cache and restart the window grid at at_. */
 #define STREAM_RESET_AUDIO(windows_, at_) do { \
@@ -1652,6 +1668,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int known_text_before = 0;
     /* The first text after a restart can lack its leading space. */
     int seam_space = 0;
+    /* A flush held back the sentence mark that ended its text. */
+    int period_held = 0;
     /* After a pause the text before it would keep shaping what follows, so
      * it is dropped; without --language the language header too, as the
      * speaker may have switched. Audio whose text is out is silenced before
@@ -1702,6 +1720,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 int64_t have = live->sample_offset + live->n_samples;
                 int pending = (held_text_tokens > 0 || have > audio_cursor) &&
                               have != last_flush_samples;
+                /* A sentence mark held back by the last flush is confirmed
+                 * when the pause has lasted as long as a pause reset needs,
+                 * before that reset. */
+                int confirm = !pending && period_held && held_text_tokens > 0;
                 double now_ms = get_time_ms();
                 if (have != idle_seen_samples) {
                     idle_seen_samples = have;
@@ -1712,6 +1734,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 double deadline_ms = -1;
                 if (ctx->stream_idle_flush_ms > 0 && pending) {
                     deadline_ms = idle_since_ms + ctx->stream_idle_flush_ms;
+                } else if (confirm) {
+                    deadline_ms = idle_since_ms + (pause_reset_sec > 0 ? pause_reset_sec * 1000.0
+                                                   : 2.0 * ctx->stream_idle_flush_ms);
                 } else if (!pending && !pause_reset_done && pause_reset_sec > 0 &&
                            (n_raw_tokens > 0 || n_enc_cache > enc_cache_start)) {
                     deadline_ms = idle_since_ms + pause_reset_sec * 1000.0;
@@ -1722,7 +1747,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 }
                 double remain_ms = deadline_ms - now_ms;
                 if (remain_ms <= 0) {
-                    if (pending) {
+                    if (pending || confirm) {
                         is_flush = 1;
                         last_flush_samples = have;
                         break;
@@ -2436,10 +2461,26 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int candidate_len = 0;
         if (is_final || is_flush || quiet_reset) {
             candidate_len = n_text_tokens;
+            /* The audio of a flush ends at a pause, and the model closes the
+             * sentence there; at a hesitation the speaker goes on and the
+             * mark is wrong. Hold it back until a second flush confirms the
+             * pause; if speech resumes, the next decode decides. A pause long
+             * enough for a pause reset needs no confirming. */
+            if (is_flush && !is_final && !quiet_reset && !period_held &&
+                !(pause_reset_sec > 0 && silent_run_sec >= pause_reset_sec) &&
+                n_text_tokens > 0 &&
+                stream_piece_ends_sentence(qwen_tokenizer_decode(
+                    tokenizer, raw_tokens[text_start + n_text_tokens - 1]))) {
+                candidate_len--;
+                period_held = 1;
+            } else {
+                period_held = 0;
+            }
         } else if (warmed_up) {
             candidate_len = n_text_tokens - rollback;
             if (candidate_len <= 0 && n_text_tokens > 0) candidate_len = n_text_tokens - 1;
             if (candidate_len < 0) candidate_len = 0;
+            period_held = 0;
         }
         /* The frontier never moves behind text already emitted (a chunk that
          * generates fewer than `rollback` new tokens would otherwise do so). */
@@ -2696,7 +2737,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 }
 
                 int periodic_reset =
-                    (!is_final && !recovery_reset &&
+                    (!is_final && !recovery_reset && !period_held &&
                      ctx->past_text_conditioning &&
                      chunk_idx >= unfixed_chunks &&
                      chunk_idx - last_trim_chunk >= reset_interval_chunks);
