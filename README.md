@@ -428,6 +428,28 @@ sudo apt install libopenblas-dev
 sudo dnf install openblas-devel
 ```
 
+### Prebuilt binary (npm)
+
+Linux x86-64 with AVX2/FMA (Haswell or newer) or Linux arm64 with ARMv8.2
+(Cortex-A55/A76 or newer, Asahi Linux), both with glibc >= 2.28, or macOS
+13.3+ (Apple Silicon or Intel):
+```bash
+npm install -g qwen-asr
+qwen-asr -d qwen3-asr-0.6b -i samples/jfk.wav
+```
+
+Release binaries are built by `scripts/build-linux.sh` (inside
+`manylinux_2_28`; x86-64-v3 or ARMv8.2, OpenBLAS linked statically) and
+`scripts/build-darwin.sh` (Apple M1 or x86-64-v3, Accelerate). The Makefile
+accepts the same overrides for custom builds:
+```bash
+make blas ARCH_FLAGS=-march=x86-64-v3 OPENBLAS_CFLAGS=-I/opt/openblas/include \
+    OPENBLAS_LIBS=/opt/openblas/lib/libopenblas.a
+```
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds all
+platforms, runs a transcription smoke test on each, and publishes to npm.
+
 ## How Fast Is It?
 
 Benchmarks were recomputed on **Apple M3 Max** (128GB RAM) with `make blas` (single run per row).

@@ -1,0 +1,138 @@
+name: Release
+
+# v* tag: build, test, publish. Manual run: build and test only.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    strategy:
+      matrix:
+        include:
+          - key: linux-x64
+            runner: ubuntu-latest
+            image: quay.io/pypa/manylinux_2_28_x86_64
+          - key: linux-arm64
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64
+    runs-on: ${{ matrix.runner }}
+    # glibc 2.28 baseline
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v6
+        with:
+          path: .openblas
+          key: openblas-${{ matrix.key }}-${{ hashFiles('scripts/build-linux.sh') }}
+
+      - run: scripts/build-linux.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prebuild-${{ matrix.key }}
+          path: npm/prebuilds/
+          if-no-files-found: error
+
+  build-darwin:
+    strategy:
+      matrix:
+        include:
+          - key: darwin-arm64
+            runner: macos-15
+          # Last Intel image; after it, cross-build with -arch x86_64
+          - key: darwin-x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: scripts/build-darwin.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prebuild-${{ matrix.key }}
+          path: npm/prebuilds/
+          if-no-files-found: error
+
+  test:
+    needs: [build-linux, build-darwin]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: prebuild-*
+          path: npm/prebuilds/
+          merge-multiple: true
+
+      - run: chmod +x npm/prebuilds/*/qwen_asr
+
+      - uses: actions/cache@v6
+        with:
+          path: qwen3-asr-0.6b
+          key: model-qwen3-asr-0.6b
+
+      - run: ./download_model.sh --model small --dir qwen3-asr-0.6b
+
+      - name: Transcribe sample via the npm launcher
+        run: |
+          out=$(node npm/bin/qwen-asr.js -d qwen3-asr-0.6b -i samples/jfk.wav --silent)
+          echo "$out"
+          echo "$out" | grep -qi "ask not what your country can do for you"
+
+      - name: Transcribe from stdin
+        run: |
+          out=$(node npm/bin/qwen-asr.js -d qwen3-asr-0.6b --stdin --silent < samples/jfk.wav)
+          echo "$out"
+          echo "$out" | grep -qi "ask what you can do for your country"
+
+  publish:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # npm trusted publishing (OIDC), no NPM_TOKEN needed
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: prebuild-*
+          path: npm/prebuilds/
+          merge-multiple: true
+
+      - run: |
+          chmod +x npm/prebuilds/*/qwen_asr
+          cp LICENSE npm/LICENSE
+          ls -lR npm/prebuilds
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1
+      - run: npm install -g npm@latest
+
+      - name: Publish
+        working-directory: npm
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          npm version "$version" --no-git-tag-version
+          # Prereleases go to "next"
+          case "$version" in
+            *-*) npm publish --access public --tag next ;;
+            *)   npm publish --access public ;;
+          esac

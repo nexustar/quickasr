@@ -10,3 +10,6 @@ samples/extra
 Qwen3-ASR
 TODO.md
 .stream_bench_refs/
+.openblas/
+npm/prebuilds/
+npm/LICENSE

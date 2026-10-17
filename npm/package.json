@@ -1,0 +1,25 @@
+{
+  "name": "qwen-asr",
+  "version": "0.0.0",
+  "description": "Qwen3-ASR speech-to-text in pure C (prebuilt CLI binary)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nexustar/qwen-asr.git"
+  },
+  "homepage": "https://github.com/nexustar/qwen-asr",
+  "keywords": ["asr", "speech-to-text", "qwen", "qwen3-asr", "transcription"],
+  "bin": {
+    "qwen-asr": "bin/qwen-asr.js"
+  },
+  "files": [
+    "bin",
+    "prebuilds",
+    "LICENSE"
+  ],
+  "os": ["linux", "darwin"],
+  "cpu": ["x64", "arm64"],
+  "engines": {
+    "node": ">=16"
+  }
+}

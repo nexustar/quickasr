@@ -2,7 +2,9 @@
 # Makefile
 
 CC = gcc
-CFLAGS_BASE = -Wall -Wextra -O3 -march=native -ffast-math
+# Override for portable builds, e.g. -march=x86-64-v3
+ARCH_FLAGS ?= -march=native
+CFLAGS_BASE = -Wall -Wextra -O3 $(ARCH_FLAGS) -ffast-math
 LDFLAGS = -lm -lpthread
 
 # Platform detection
@@ -44,8 +46,11 @@ ifeq ($(UNAME_S),Darwin)
 blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK
 blas: LDFLAGS += -framework Accelerate
 else
-blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_OPENBLAS -I/usr/include/openblas
-blas: LDFLAGS += -lopenblas
+# Override to link a custom OpenBLAS
+OPENBLAS_CFLAGS ?= -I/usr/include/openblas
+OPENBLAS_LIBS ?= -lopenblas
+blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_OPENBLAS $(OPENBLAS_CFLAGS)
+blas: LDFLAGS := $(OPENBLAS_LIBS) $(LDFLAGS)
 endif
 blas:
 	@$(MAKE) clean
