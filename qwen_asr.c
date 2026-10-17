@@ -1372,6 +1372,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      * 140 text tokens of decoder context.  raw_tokens array itself
      * grows unbounded (negligible memory) for correct text matching. */
     #define QWEN_STREAM_MAX_ENC_WINDOWS  4
+    #define QWEN_STREAM_MIN_PARTIAL_SAMPLES 800   /* 50 ms */
     #define QWEN_STREAM_MAX_PREFIX_TOKENS 150
     #define QWEN_STREAM_MAX_REPEAT_TOKEN_RUN 12
     #define QWEN_STREAM_OVERLAP_MAX_TOKENS 48
@@ -1875,7 +1876,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
 
             float *partial_enc = NULL;
             int partial_seq = 0;
-            if (!enc_failed && full_end < audio_cursor) {
+            /* A few samples past a window boundary are too short to encode
+             * and hold no speech. */
+            if (!enc_failed && full_end < audio_cursor &&
+                audio_cursor - full_end >= QWEN_STREAM_MIN_PARTIAL_SAMPLES) {
                 int64_t partial_samples64 = audio_cursor - full_end;
                 int64_t partial_off64 = full_end - local_base_sample;
                 if (partial_samples64 > INT_MAX || partial_off64 < 0 ||
