@@ -17,6 +17,7 @@
 #include <math.h>
 #include <limits.h>
 #include <sys/time.h>
+#include <time.h>
 
 /* Global verbose flag */
 int qwen_verbose = 0;
@@ -238,6 +239,7 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
     ctx->stream_chunk_sec = 2.0f;
     ctx->stream_rollback = 5;
     ctx->stream_unfixed_chunks = 2;
+    ctx->stream_idle_flush_ms = 800;
     ctx->stream_max_new_tokens = 32;
     ctx->past_text_conditioning = 0;
     ctx->skip_silence = 0;
@@ -1418,6 +1420,14 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int n_emitted_text_tokens = 0;
     int emitted_text_cap = 8192;
     int stagnant_chunks = 0;
+    /* Raw tokens [0, min_prefix_raw) have been emitted. They stay in the
+     * decoder prefix from then on: text already written out cannot be
+     * revised, so the decoder must not be free to re-decode it. */
+    int min_prefix_raw = 0;
+    int held_text_tokens = 0;        /* decoded on the last chunk, not yet emitted */
+    int64_t idle_seen_samples = -1;  /* live sample count when last seen to grow */
+    double idle_since_ms = 0;
+    int64_t last_flush_samples = -1; /* live sample count at the last idle flush */
     /* Result text accumulator */
     size_t result_cap = 4096;
     size_t result_len = 0;
@@ -1464,12 +1474,44 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int consecutive_silence_skips = 0;
 
     while (audio_cursor < audio_n_samples || (live && !live_eof)) {
+        int is_flush = 0;
         /* Live mode: wait until we have enough data for the next chunk. */
         if (live) {
             int64_t want = audio_cursor + chunk_samples;
             pthread_mutex_lock(&live->mutex);
-            while (live->sample_offset + live->n_samples < want && !live->eof)
-                pthread_cond_wait(&live->cond, &live->mutex);
+            while (live->sample_offset + live->n_samples < want && !live->eof) {
+                /* Idle flush: a live source that stops sending (a speaker
+                 * pausing behind a voice gate) would otherwise leave the
+                 * partial chunk and the held-back tail undecoded until audio
+                 * resumes. After stream_idle_flush_ms without new samples,
+                 * decode what is buffered and emit everything. */
+                int64_t have = live->sample_offset + live->n_samples;
+                int pending = (held_text_tokens > 0 || have > audio_cursor) &&
+                              have != last_flush_samples;
+                if (ctx->stream_idle_flush_ms <= 0 || !pending) {
+                    pthread_cond_wait(&live->cond, &live->mutex);
+                    continue;
+                }
+                double now_ms = get_time_ms();
+                if (have != idle_seen_samples) {
+                    idle_seen_samples = have;
+                    idle_since_ms = now_ms;
+                }
+                double remain_ms = idle_since_ms + ctx->stream_idle_flush_ms - now_ms;
+                if (remain_ms <= 0) {
+                    is_flush = 1;
+                    last_flush_samples = have;
+                    break;
+                }
+                struct timeval tv;
+                gettimeofday(&tv, NULL);
+                int64_t wake_us = (int64_t)tv.tv_sec * 1000000 + tv.tv_usec +
+                                  (int64_t)(remain_ms * 1000.0) + 1000;
+                struct timespec ts;
+                ts.tv_sec = (time_t)(wake_us / 1000000);
+                ts.tv_nsec = (long)(wake_us % 1000000) * 1000;
+                pthread_cond_timedwait(&live->cond, &live->mutex, &ts);
+            }
 
             int64_t live_start = live->sample_offset;
             int64_t live_count = live->n_samples;
@@ -1531,8 +1573,14 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         }
 
         double chunk_t0 = get_time_ms();
-        audio_cursor += chunk_samples;
-        if (audio_cursor > audio_n_samples) audio_cursor = audio_n_samples;
+        if (is_flush && audio_n_samples - audio_cursor < QWEN_SAMPLE_RATE / 5 &&
+            audio_cursor > 0) {
+            /* Under 200 ms of new audio: re-decode the same span to release
+             * the held tail and leave the sliver for the next chunk. */
+        } else {
+            audio_cursor += chunk_samples;
+            if (audio_cursor > audio_n_samples) audio_cursor = audio_n_samples;
+        }
         int is_final = live ? (live_eof && audio_cursor >= audio_n_samples)
                             : (audio_cursor >= audio_n_samples);
 
@@ -1544,7 +1592,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
          * intact -- only the per-chunk emit cycle is short-circuited.
          * Capped at QWEN_STREAM_MAX_SILENCE_SKIPS in a row so any pending
          * decoder/text state still gets flushed during very long pauses. */
-        if (ctx->skip_silence && !is_final && live) {
+        if (ctx->skip_silence && !is_final && !is_flush && live) {
             int64_t chunk_start = audio_cursor - chunk_samples;
             if (chunk_start < 0) chunk_start = 0;
             int64_t chunk_local_off = chunk_start - local_base_sample;
@@ -1583,7 +1631,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     }
                 }
 
-                if (chunk_rms < threshold &&
+                if (chunk_rms < threshold && held_text_tokens > 0 &&
+                    ctx->stream_idle_flush_ms > 0) {
+                    /* First silent chunk after speech: decode it once so the
+                     * held tail comes out now, not when speech resumes. */
+                    is_flush = 1;
+                } else if (chunk_rms < threshold &&
                     consecutive_silence_skips < QWEN_STREAM_MAX_SILENCE_SKIPS) {
                     consecutive_silence_skips++;
                     if (qwen_verbose >= 2) {
@@ -1597,7 +1650,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     chunk_idx++;
                     continue;
                 }
-                consecutive_silence_skips = 0;
+                if (!is_flush) consecutive_silence_skips = 0;
             }
         }
 
@@ -1773,8 +1826,11 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int n_prefix_tokens_full = 0;
         int n_prefix_tokens = 0;
         int prefix_offset = 0;
-        if (ctx->past_text_conditioning && chunk_idx >= unfixed_chunks && n_raw_tokens > 0) {
+        int warmed_up = (chunk_idx >= unfixed_chunks || min_prefix_raw > 0);
+        if (ctx->past_text_conditioning && warmed_up && n_raw_tokens > 0) {
             n_prefix_tokens_full = n_raw_tokens - rollback;
+            if (n_prefix_tokens_full < min_prefix_raw) n_prefix_tokens_full = min_prefix_raw;
+            if (n_prefix_tokens_full > n_raw_tokens) n_prefix_tokens_full = n_raw_tokens;
             if (n_prefix_tokens_full < 0) n_prefix_tokens_full = 0;
             n_prefix_tokens = n_prefix_tokens_full;
             if (n_prefix_tokens > QWEN_STREAM_MAX_PREFIX_TOKENS) {
@@ -2024,12 +2080,19 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
          *   streaming still advances,
          * - final chunk: emit everything. */
         int candidate_len = 0;
-        if (is_final) {
+        if (is_final || is_flush) {
             candidate_len = n_text_tokens;
-        } else if (chunk_idx >= unfixed_chunks) {
+        } else if (warmed_up) {
             candidate_len = n_text_tokens - rollback;
             if (candidate_len <= 0 && n_text_tokens > 0) candidate_len = n_text_tokens - 1;
             if (candidate_len < 0) candidate_len = 0;
+        }
+        /* The frontier never moves behind text already emitted (a chunk that
+         * generates fewer than `rollback` new tokens would otherwise do so). */
+        if (min_prefix_raw > text_start) {
+            int emitted_text = min_prefix_raw - text_start;
+            if (emitted_text > n_text_tokens) emitted_text = n_text_tokens;
+            if (candidate_len < emitted_text) candidate_len = emitted_text;
         }
 
         /* Streaming commit: emit token delta against the previous candidate.
@@ -2070,6 +2133,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     n_raw_tokens = 0;
                     n_stable_text_tokens = 0;
                 }
+                min_prefix_raw = n_raw_tokens > rollback ? n_raw_tokens - rollback : 0;
+                held_text_tokens = 0;
                 prev_prefill_len = 0;
                 stream_clear_enc_cache(enc_cache,
                                        &n_enc_cache,
@@ -2151,6 +2216,11 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 }
 
                 n_stable_text_tokens = candidate_len;
+                held_text_tokens = n_text_tokens - candidate_len;
+                if (ctx->past_text_conditioning && candidate_len > 0 &&
+                    text_start + candidate_len > min_prefix_raw) {
+                    min_prefix_raw = text_start + candidate_len;
+                }
 
                 int periodic_reset =
                     (!is_final &&
@@ -2168,6 +2238,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                         n_raw_tokens = 0;
                         n_stable_text_tokens = 0;
                     }
+                    min_prefix_raw = n_raw_tokens > rollback ? n_raw_tokens - rollback : 0;
+                    held_text_tokens = 0;
                     prev_prefill_len = 0;
                     stream_trim_enc_cache(enc_cache, n_enc_cache,
                                           &enc_cache_start,

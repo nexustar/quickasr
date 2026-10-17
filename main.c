@@ -61,6 +61,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --stream-chunk-sec <secs>  Streaming chunk size in seconds (1..8, default 2)\n");
     fprintf(stderr, "                             Raise on larger models / slower hardware if per-chunk\n");
     fprintf(stderr, "                             processing > chunk_sec (display latency grows over time)\n");
+    fprintf(stderr, "  --stream-idle-flush-ms <ms>  With --stdin --stream: when no audio arrives for this\n");
+    fprintf(stderr, "                             long, emit the text still held back (default 800, 0=off)\n");
     fprintf(stderr, "  --enc-window-sec <secs>    Encoder attention window in seconds (1..8, default 8)\n");
     fprintf(stderr, "  --past-text <yes|no|auto>  Reuse previously decoded text as context for the next\n");
     fprintf(stderr, "                             segment/chunk (continuity bias; auto=yes for --stream)\n");
@@ -86,6 +88,7 @@ int main(int argc, char **argv) {
     int stream_mode = 0;
     int stream_max_new_tokens = -1; /* -1 = use default (32) */
     float stream_chunk_sec = -1; /* -1 = use default (2s) */
+    int stream_idle_flush_ms = -1; /* -1 = use default (800) */
     float enc_window_sec = -1;   /* -1 = use default (8s) */
     const char *prompt_text = NULL;
     const char *force_language = NULL;
@@ -110,6 +113,12 @@ int main(int argc, char **argv) {
             stream_max_new_tokens = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--stream-chunk-sec") == 0 && i + 1 < argc) {
             stream_chunk_sec = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--stream-idle-flush-ms") == 0 && i + 1 < argc) {
+            stream_idle_flush_ms = atoi(argv[++i]);
+            if (stream_idle_flush_ms < 0) {
+                fprintf(stderr, "Error: --stream-idle-flush-ms must be >= 0\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--enc-window-sec") == 0 && i + 1 < argc) {
             enc_window_sec = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--past-text") == 0 && i + 1 < argc) {
@@ -191,6 +200,7 @@ int main(int argc, char **argv) {
     }
     if (stream_max_new_tokens > 0) ctx->stream_max_new_tokens = stream_max_new_tokens;
     if (stream_chunk_sec >= 0) ctx->stream_chunk_sec = stream_chunk_sec;
+    if (stream_idle_flush_ms >= 0) ctx->stream_idle_flush_ms = stream_idle_flush_ms;
     if (past_text_conditioning_mode >= 0)
         ctx->past_text_conditioning = past_text_conditioning_mode;
     else if (stream_mode)

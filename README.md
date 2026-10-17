@@ -102,6 +102,7 @@ Streaming mode processes audio in **2-second chunks** with rollback text conditi
 3. Decoder prompt includes previous output minus a rollback suffix (5 tokens by default) to stabilize chunk boundaries.
 4. Per chunk decode is bounded by `--stream-max-new-tokens` (default `32`).
 5. Only stable text is emitted; final chunk flushes remaining text.
+6. With live stdin, a pause also flushes: when no audio arrives for `--stream-idle-flush-ms` (default `800`), or on the first silent chunk after speech with `--skip-silence`, the buffered audio is decoded and the held-back text is emitted. The stream stays open and decoding continues from there when audio resumes. Without this a source that stops sending during silence (a voice gate, a paused capture) leaves the end of each utterance unprinted until the speaker resumes.
 
 This keeps encoder recomputation under control. For long streams, a **sliding window** automatically bounds both encoder and decoder context so that memory and compute stay flat indefinitely:
 
@@ -119,6 +120,7 @@ Default stream settings:
 - `unfixed_chunks`: 2
 - `max_new_tokens`: 32 (`--stream-max-new-tokens`)
 - `past_text`: `auto` by default (effectively `yes` for `--stream`, `no` otherwise)
+- `idle_flush`: 800 ms (`--stream-idle-flush-ms`, `0` disables; live stdin only)
 
 Streaming tuning:
 
