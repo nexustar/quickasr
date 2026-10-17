@@ -823,6 +823,28 @@ static int should_insert_boundary_space(int prev_ch, int next_ch) {
     return 1;
 }
 
+/* After punctuation, a word of a script written with spaces between words
+ * (Latin, Cyrillic, Hangul, ...) starts with a space. Not CJK, kana, Thai,
+ * Lao, Myanmar or Khmer, which are written without them. */
+static int stream_seam_needs_space(int prev_ch, const char *next) {
+    if (prev_ch <= 0 || !strchr(".,?!;:", prev_ch) || !next || !*next) return 0;
+    const unsigned char *u = (const unsigned char *)next;
+    unsigned cp;
+    if (u[0] < 0x80) return isalpha(u[0]) != 0;
+    if ((u[0] & 0xE0) == 0xC0 && u[1]) cp = ((u[0] & 0x1Fu) << 6) | (u[1] & 0x3Fu);
+    else if ((u[0] & 0xF0) == 0xE0 && u[1] && u[2])
+        cp = ((u[0] & 0x0Fu) << 12) | ((u[1] & 0x3Fu) << 6) | (u[2] & 0x3Fu);
+    else return 0;
+    if (cp < 0xC0) return 0;                                  /* Latin-1 symbols */
+    if (cp >= 0x0E00 && cp <= 0x0EFF) return 0;               /* Thai, Lao */
+    if (cp >= 0x1000 && cp <= 0x109F) return 0;               /* Myanmar */
+    if (cp >= 0x1780 && cp <= 0x17FF) return 0;               /* Khmer */
+    if (cp >= 0x2E80 && cp <= 0x9FFF) return 0;               /* CJK, kana */
+    if (cp >= 0xF900 && cp <= 0xFAFF) return 0;
+    if (cp >= 0xFF00 && cp <= 0xFFEF) return 0;               /* full-width forms */
+    return 1;
+}
+
 typedef struct {
     qwen_token_cb downstream_cb;
     void *downstream_userdata;
@@ -1555,6 +1577,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int rms_hist_pos = 0;
     int rms_hist_count = 0;
     int consecutive_silence_skips = 0;
+    /* The first text after a restart can lack its leading space. */
+    int seam_space = 0;
     /* After a pause the text before it would keep shaping what follows, so
      * it is dropped. The silence test is relative and a quiet speaker can
      * pass it: windows overlapping the silent run are kept and re-decoded.
@@ -1586,6 +1610,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         STREAM_REDECODE_FROM_KEPT(); \
         pause_reset_done = 1; \
         last_trim_chunk = chunk_idx; \
+        seam_space = 1; \
         if (qwen_verbose >= 2) fprintf(stderr, "  Pause reset applied\n"); \
     } while (0)
 
@@ -2438,6 +2463,24 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 if (ctx->stream_update_cb && upd_pending_len > 0) {
                     stream_str_append(&upd_commit, upd_pending, upd_pending_len);
                 }
+                if (seam_space && emit_start < candidate_len) {
+                    const char *first = qwen_tokenizer_decode(tokenizer, stable_text_tokens[emit_start]);
+                    if (result_len > 0 &&
+                        stream_seam_needs_space((unsigned char)result[result_len - 1], first)) {
+                        if (ctx->token_cb) ctx->token_cb(" ", ctx->token_cb_userdata);
+                        if (ctx->stream_update_cb) stream_str_append(&upd_commit, " ", 1);
+                        char *grown = result;
+                        if (result_len + 2 > result_cap) {
+                            grown = (char *)realloc(result, result_cap * 2);
+                            if (grown) { result = grown; result_cap *= 2; }
+                        }
+                        if (grown) {
+                            result[result_len++] = ' ';
+                            result[result_len] = '\0';
+                        }
+                    }
+                    seam_space = 0;
+                }
                 for (int i = emit_start; i < candidate_len; i++) {
                     int tok = stable_text_tokens[i];
                     const char *piece = qwen_tokenizer_decode(tokenizer, tok);
@@ -2553,6 +2596,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     STREAM_REDECODE_FROM_KEPT();
                     did_periodic_reset = 1;
                     last_trim_chunk = chunk_idx;
+                    seam_space = 1;
                 } else if (periodic_reset) {
                     if (stream_reanchor_text_state(ctx,
                                                    emitted_text_tokens,
@@ -2575,6 +2619,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                                           QWEN_STREAM_RESET_KEEP_ENC_WINDOWS);
                     did_periodic_reset = 1;
                     last_trim_chunk = chunk_idx;
+                    seam_space = 1;
                 }
                 /* A flushed silent chunk can already be a long enough pause
                  * (with 4 s chunks a single one is). */
@@ -2604,6 +2649,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     stitch_hold = 0;
                     STREAM_REDECODE_FROM_KEPT();
                     last_trim_chunk = chunk_idx;
+                    seam_space = 1;
                     if (qwen_verbose >= 2) fprintf(stderr, "  Stall reset applied\n");
                 }
             }
@@ -2639,6 +2685,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 }
                 last_recovery_chunk = chunk_idx;
                 last_trim_chunk = chunk_idx;
+                seam_space = 1;
                 stagnant_chunks = 0;
                 quiet_chunks = 0;
                 did_recovery_reset = 1;
