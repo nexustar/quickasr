@@ -113,6 +113,15 @@ These limits activate automatically when the stream is long enough to exceed the
 
 `--stream --silent` has a special non-interactive behavior for file input: it skips chunk-by-chunk streaming and runs one direct final refinement pass. (For live stdin streaming, chunked mode is still used.)
 
+`--stream-json` replaces the plain token stream with one JSON object per line:
+
+```
+{"commit":"And so, my fellow","tail":" Americans, ask not."}
+{"commit":" Americans, ask not what your","tail":" country can do."}
+```
+
+`commit` is text that will not change; append it. `tail` is the model's current guess at what follows, including the rollback tokens that plain mode holds back and everything decoded during the first `unfixed_chunks`; it replaces the previous tail and can be rewritten or withdrawn. Show it for low latency, but split sentences on `commit` only: the tail routinely ends in a period that the next chunk takes back.
+
 Default stream settings:
 - `chunk_size`: 2s (`--stream-chunk-sec`, range `1..8`)
 - `encoder_window`: 8s (`--enc-window-sec`, range `1..8`)

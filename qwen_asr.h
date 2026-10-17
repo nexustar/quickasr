@@ -171,6 +171,13 @@ typedef struct {
  * 'piece' is the decoded token string (UTF-8). */
 typedef void (*qwen_token_cb)(const char *piece, void *userdata);
 
+/* Streaming update callback, called once per decoded chunk when anything
+ * changed. `commit` is new text that is final and will not be revised; append
+ * it. `tail` is the current provisional continuation after all committed text;
+ * it replaces the previous tail and may be rewritten or withdrawn. Both are
+ * valid UTF-8 and either may be empty. */
+typedef void (*qwen_stream_update_cb)(const char *commit, const char *tail, void *userdata);
+
 /* ========================================================================
  * Main Context
  * ======================================================================== */
@@ -211,6 +218,8 @@ typedef struct {
     /* Token streaming callback (optional) */
     qwen_token_cb token_cb;
     void *token_cb_userdata;
+    qwen_stream_update_cb stream_update_cb;
+    void *stream_update_cb_userdata;
 
     /* Segmentation settings */
     float segment_sec;             /* 0 = no splitting, default full-audio decode */
@@ -273,6 +282,10 @@ void qwen_free(qwen_ctx_t *ctx);
 /* Set a callback to receive each decoded token as it's generated.
  * Set cb=NULL to disable. The callback is invoked during transcription. */
 void qwen_set_token_callback(qwen_ctx_t *ctx, qwen_token_cb cb, void *userdata);
+
+/* Set a callback receiving committed text plus the provisional tail in
+ * --stream mode. Set to NULL to disable. */
+void qwen_set_stream_update_callback(qwen_ctx_t *ctx, qwen_stream_update_cb cb, void *userdata);
 
 /* Set optional system prompt text (UTF-8). Pass NULL or "" to clear.
  * Returns 0 on success, -1 on allocation/encoding errors. */

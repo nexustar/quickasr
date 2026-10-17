@@ -19,6 +19,34 @@ static void stream_token(const char *piece, void *userdata) {
     fflush(stdout);
 }
 
+/* --stream-json: one {"commit":"...","tail":"..."} object per line. */
+static void json_put_string(const char *s) {
+    putchar('"');
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        switch (*p) {
+        case '"':  fputs("\\\"", stdout); break;
+        case '\\': fputs("\\\\", stdout); break;
+        case '\n': fputs("\\n", stdout); break;
+        case '\r': fputs("\\r", stdout); break;
+        case '\t': fputs("\\t", stdout); break;
+        default:
+            if (*p < 0x20) printf("\\u%04x", *p);
+            else putchar(*p);
+        }
+    }
+    putchar('"');
+}
+
+static void stream_update_json(const char *commit, const char *tail, void *userdata) {
+    (void)userdata;
+    fputs("{\"commit\":", stdout);
+    json_put_string(commit);
+    fputs(",\"tail\":", stdout);
+    json_put_string(tail);
+    fputs("}\n", stdout);
+    fflush(stdout);
+}
+
 /* Parse --past-text value.
  * out_mode:  1=yes, 0=no, -1=auto */
 static int parse_past_text_mode(const char *s, int *out_mode) {
@@ -63,6 +91,9 @@ static void usage(const char *prog) {
     fprintf(stderr, "                             processing > chunk_sec (display latency grows over time)\n");
     fprintf(stderr, "  --stream-idle-flush-ms <ms>  With --stdin --stream: when no audio arrives for this\n");
     fprintf(stderr, "                             long, emit the text still held back (default 800, 0=off)\n");
+    fprintf(stderr, "  --stream-json              With --stream: print one JSON object per line,\n");
+    fprintf(stderr, "                             {\"commit\":..., \"tail\":...}: commit is final text to\n");
+    fprintf(stderr, "                             append, tail is the provisional rest and replaces the last one\n");
     fprintf(stderr, "  --enc-window-sec <secs>    Encoder attention window in seconds (1..8, default 8)\n");
     fprintf(stderr, "  --past-text <yes|no|auto>  Reuse previously decoded text as context for the next\n");
     fprintf(stderr, "                             segment/chunk (continuity bias; auto=yes for --stream)\n");
@@ -89,6 +120,7 @@ int main(int argc, char **argv) {
     int stream_max_new_tokens = -1; /* -1 = use default (32) */
     float stream_chunk_sec = -1; /* -1 = use default (2s) */
     int stream_idle_flush_ms = -1; /* -1 = use default (800) */
+    int stream_json = 0;
     float enc_window_sec = -1;   /* -1 = use default (8s) */
     const char *prompt_text = NULL;
     const char *force_language = NULL;
@@ -119,6 +151,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Error: --stream-idle-flush-ms must be >= 0\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--stream-json") == 0) {
+            stream_json = 1;
         } else if (strcmp(argv[i], "--enc-window-sec") == 0 && i + 1 < argc) {
             enc_window_sec = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--past-text") == 0 && i + 1 < argc) {
@@ -164,6 +198,10 @@ int main(int argc, char **argv) {
     }
     if (stream_chunk_sec >= 0 && (stream_chunk_sec < 1.0f || stream_chunk_sec > 8.0f)) {
         fprintf(stderr, "Error: --stream-chunk-sec must be in [1, 8], got %.3f\n", stream_chunk_sec);
+        return 1;
+    }
+    if (stream_json && !stream_mode) {
+        fprintf(stderr, "Error: --stream-json requires --stream\n");
         return 1;
     }
     if (stream_max_new_tokens == 0 || stream_max_new_tokens < -1) {
@@ -223,7 +261,10 @@ int main(int argc, char **argv) {
 
     /* Stream tokens to stdout only in non-silent mode.
      * In silent mode we print the final string returned by the API. */
-    if (emit_tokens) qwen_set_token_callback(ctx, stream_token, NULL);
+    if (stream_json) {
+        qwen_set_token_callback(ctx, NULL, NULL);
+        qwen_set_stream_update_callback(ctx, stream_update_json, NULL);
+    } else if (emit_tokens) qwen_set_token_callback(ctx, stream_token, NULL);
     else qwen_set_token_callback(ctx, NULL, NULL);
 
     /* Transcribe */
@@ -250,7 +291,8 @@ int main(int argc, char **argv) {
     }
 
     if (text) {
-        if (emit_tokens) printf("\n");
+        if (stream_json) { /* everything was already reported line by line */ }
+        else if (emit_tokens) printf("\n");
         else printf("%s\n", text);
         free(text);
     } else {

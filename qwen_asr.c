@@ -28,6 +28,11 @@ void qwen_set_token_callback(qwen_ctx_t *ctx, qwen_token_cb cb, void *userdata) 
     ctx->token_cb_userdata = userdata;
 }
 
+void qwen_set_stream_update_callback(qwen_ctx_t *ctx, qwen_stream_update_cb cb, void *userdata) {
+    ctx->stream_update_cb = cb;
+    ctx->stream_update_cb_userdata = userdata;
+}
+
 static const char *QWEN_SUPPORTED_LANGUAGES[] = {
     "Chinese", "English", "Cantonese", "Arabic", "German", "French",
     "Spanish", "Portuguese", "Indonesian", "Italian", "Korean", "Russian",
@@ -1132,6 +1137,45 @@ static void stream_clear_enc_cache(stream_enc_window_t *enc_cache,
     *next_window_start = new_start_sample;
 }
 
+/* Length of the longest prefix of s[0..n) that does not end inside a UTF-8
+ * sequence. Tokens are byte-level, so a character can span two tokens. */
+static size_t stream_utf8_complete_len(const char *s, size_t n) {
+    size_t back = 0;
+    while (back < n && back < 4) {
+        unsigned char c = (unsigned char)s[n - 1 - back];
+        if ((c & 0xC0) != 0x80) {
+            size_t need = 1;
+            if ((c & 0xE0) == 0xC0) need = 2;
+            else if ((c & 0xF0) == 0xE0) need = 3;
+            else if ((c & 0xF8) == 0xF0) need = 4;
+            return (back + 1 >= need) ? n : n - 1 - back;
+        }
+        back++;
+    }
+    return n;
+}
+
+/* Growable byte buffer for stream update strings. */
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+} stream_str_t;
+
+static void stream_str_append(stream_str_t *s, const char *data, size_t n) {
+    if (s->len + n + 1 > s->cap) {
+        size_t new_cap = s->cap > 0 ? s->cap : 256;
+        while (s->len + n + 1 > new_cap) new_cap *= 2;
+        char *tmp = (char *)realloc(s->buf, new_cap);
+        if (!tmp) return;
+        s->buf = tmp;
+        s->cap = new_cap;
+    }
+    memcpy(s->buf + s->len, data, n);
+    s->len += n;
+    s->buf[s->len] = '\0';
+}
+
 /* Drop the oldest cached encoder windows until at most `keep` remain. */
 static int stream_trim_enc_cache(stream_enc_window_t *enc_cache,
                                  int n_enc_cache,
@@ -1391,7 +1435,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      * streaming chunks are not externally consumed and the final answer is
      * already produced by a full refinement pass. Skip chunk-by-chunk
      * decoding entirely. (In live mode we must still use the chunked loop.) */
-    if (!ctx->token_cb && !live) {
+    if (!ctx->token_cb && !ctx->stream_update_cb && !live) {
         if (qwen_verbose >= 2) {
             fprintf(stderr, "Streaming: no token callback, using direct final refinement\n");
         }
@@ -1428,6 +1472,11 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int64_t idle_seen_samples = -1;  /* live sample count when last seen to grow */
     double idle_since_ms = 0;
     int64_t last_flush_samples = -1; /* live sample count at the last idle flush */
+    /* Update callback state: bytes of a committed character still waiting
+     * for its remaining bytes, and the tail last reported. */
+    stream_str_t upd_commit = {0}, upd_tail = {0}, upd_last_tail = {0};
+    char upd_pending[4];
+    size_t upd_pending_len = 0;
     /* Result text accumulator */
     size_t result_cap = 4096;
     size_t result_len = 0;
@@ -2144,6 +2193,11 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                                        full_end);
                 stagnant_chunks = 0;
                 did_recovery_reset = 1;
+                if (ctx->stream_update_cb && upd_last_tail.len > 0) {
+                    /* The held tokens were discarded with the reset. */
+                    ctx->stream_update_cb("", "", ctx->stream_update_cb_userdata);
+                    upd_last_tail.len = 0;
+                }
                 if (qwen_monitor) {
                     fprintf(stderr, "!");
                     fflush(stderr);
@@ -2186,12 +2240,17 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     }
                 }
 
+                upd_commit.len = 0;
+                if (ctx->stream_update_cb && upd_pending_len > 0) {
+                    stream_str_append(&upd_commit, upd_pending, upd_pending_len);
+                }
                 for (int i = emit_start; i < candidate_len; i++) {
                     int tok = stable_text_tokens[i];
                     const char *piece = qwen_tokenizer_decode(tokenizer, tok);
                     if (ctx->token_cb) ctx->token_cb(piece, ctx->token_cb_userdata);
 
                     size_t plen = strlen(piece);
+                    if (ctx->stream_update_cb) stream_str_append(&upd_commit, piece, plen);
                     if (result_len + plen + 1 > result_cap) {
                         while (result_len + plen + 1 > result_cap) result_cap *= 2;
                         result = (char *)realloc(result, result_cap);
@@ -2220,6 +2279,49 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 if (ctx->past_text_conditioning && candidate_len > 0 &&
                     text_start + candidate_len > min_prefix_raw) {
                     min_prefix_raw = text_start + candidate_len;
+                }
+
+                if (ctx->stream_update_cb) {
+                    /* Commit only whole characters; a split one waits in
+                     * upd_pending and leads the tail meanwhile. */
+                    size_t commit_len = is_final ? upd_commit.len
+                        : stream_utf8_complete_len(upd_commit.buf ? upd_commit.buf : "",
+                                                   upd_commit.len);
+                    upd_pending_len = upd_commit.len - commit_len;
+                    if (upd_pending_len > 0) {
+                        memcpy(upd_pending, upd_commit.buf + commit_len, upd_pending_len);
+                    }
+                    upd_tail.len = 0;
+                    if (upd_pending_len > 0) {
+                        stream_str_append(&upd_tail, upd_pending, upd_pending_len);
+                    }
+                    for (int i = candidate_len; i < n_text_tokens; i++) {
+                        const char *piece = qwen_tokenizer_decode(tokenizer, candidate_tokens[i]);
+                        stream_str_append(&upd_tail, piece, strlen(piece));
+                    }
+                    upd_tail.len = stream_utf8_complete_len(upd_tail.buf ? upd_tail.buf : "",
+                                                            upd_tail.len);
+                    int tail_changed = upd_tail.len != upd_last_tail.len ||
+                        (upd_tail.len > 0 &&
+                         memcmp(upd_tail.buf, upd_last_tail.buf, upd_tail.len) != 0);
+                    if (commit_len > 0 || tail_changed) {
+                        char *commit_str = (char *)malloc(commit_len + 1);
+                        char *tail_str = (char *)malloc(upd_tail.len + 1);
+                        if (commit_str && tail_str) {
+                            if (commit_len > 0) memcpy(commit_str, upd_commit.buf, commit_len);
+                            commit_str[commit_len] = '\0';
+                            if (upd_tail.len > 0) memcpy(tail_str, upd_tail.buf, upd_tail.len);
+                            tail_str[upd_tail.len] = '\0';
+                            ctx->stream_update_cb(commit_str, tail_str,
+                                                  ctx->stream_update_cb_userdata);
+                        }
+                        free(commit_str);
+                        free(tail_str);
+                        upd_last_tail.len = 0;
+                        if (upd_tail.len > 0) {
+                            stream_str_append(&upd_last_tail, upd_tail.buf, upd_tail.len);
+                        }
+                    }
                 }
 
                 int periodic_reset =
@@ -2301,6 +2403,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     free(raw_tokens);
     free(stable_text_tokens);
     free(emitted_text_tokens);
+    free(upd_commit.buf);
+    free(upd_tail.buf);
+    free(upd_last_tail.buf);
     qwen_tokenizer_free(tokenizer);
     free(compacted_samples);
     free(local_samples);

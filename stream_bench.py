@@ -11,7 +11,8 @@ model's offline transcript, so model recognition errors cancel out:
           offline transcript (duplicates, hallucinated text)
   gap     longest stretch of the offline transcript missing from the
           streaming output, converted to seconds of audio
-  first   seconds until the first text arrives            (--pace only)
+  first   seconds until the first text arrives            (--pace only;
+          with --stream-json a provisional tail counts)
   stuck   characters that only arrive after stdin closes  (--pace only)
   tail    seconds from end of audio to the last text      (--pace only)
 
@@ -22,6 +23,10 @@ Usage examples:
   # Latency and end-of-utterance behaviour: real-time feed, then 6 s with
   # stdin open and no audio, the way a live client pauses
   ./stream_bench.py -d qwen3-asr-0.6b --pace --hold 6 clips/*.wav
+
+Arguments after a literal -- replace the default streaming flags
+(--stream-max-new-tokens 32 --skip-silence --past-text yes):
+  ./stream_bench.py -d qwen3-asr-0.6b --pace clips/*.wav -- --stream-json --past-text yes
 
 Audio in any format ffmpeg reads is converted to 16 kHz mono s16le; files
 ending in .raw are assumed to be in that format already. No audio ships with
@@ -138,6 +143,31 @@ def run_stream(cmd: List[str], pcm: bytes, pace: bool, hold: float
     return [(t, b.decode("utf-8", errors="replace")) for t, b in events], t_audio_end, t_close
 
 
+def parse_json_updates(events: List[Tuple[float, str]]
+                       ) -> Tuple[List[Tuple[float, str]], Optional[float]]:
+    """Turn --stream-json lines into (time, committed text) pieces plus the
+    time anything, committed or provisional, was first reported."""
+    commits: List[Tuple[float, str]] = []
+    first_visible: Optional[float] = None
+    pending = ""
+    for t, chunk in events:
+        pending += chunk
+        while "\n" in pending:
+            line, pending = pending.split("\n", 1)
+            if not line.strip():
+                continue
+            try:
+                upd = json.loads(line)
+            except ValueError:
+                continue
+            commit, tail = upd.get("commit", ""), upd.get("tail", "")
+            if first_visible is None and (commit.strip() or tail.strip()):
+                first_visible = t
+            if commit:
+                commits.append((t, commit))
+    return commits, first_visible
+
+
 def compare(ref: str, out: str, dur: float) -> Tuple[float, float, float]:
     a, b = normalize_text(ref), normalize_text(out)
     if not a:
@@ -169,18 +199,25 @@ def parse_args() -> argparse.Namespace:
                     help="files to run concurrently (keep at 1 with --pace: contention skews timing)")
     ap.add_argument("--json", type=Path, help="write per-file results here")
     ap.add_argument("--label", default="", help="free-form label stored in the JSON output")
-    ap.add_argument("stream_args", nargs=argparse.REMAINDER,
-                    help="after --, extra arguments for the streaming run "
-                         "(default: --stream-max-new-tokens 32 --skip-silence --past-text yes)")
-    return ap.parse_args()
+    # Everything after a literal "--" goes to the streaming run. Split it off
+    # by hand: argparse would hand those words to the `audio` list.
+    argv = sys.argv[1:]
+    stream_args: List[str] = []
+    if "--" in argv:
+        cut = argv.index("--")
+        argv, stream_args = argv[:cut], argv[cut + 1:]
+    args = ap.parse_args(argv)
+    args.stream_args = stream_args
+    return args
 
 
 def main() -> int:
     args = parse_args()
-    extra_args = [a for a in args.stream_args if a != "--"]
+    extra_args = list(args.stream_args)
     if not extra_args:
         extra_args = ["--stream-max-new-tokens", "32", "--skip-silence", "--past-text", "yes"]
     cmd = [args.binary, "-d", args.model_dir, "--stdin", "--stream"] + extra_args
+    json_updates = "--stream-json" in extra_args
 
     results = []
     hdr = f"{'file':38s} {'dur':>6s} {'cover':>6s} {'extra':>6s} {'gap':>6s}"
@@ -200,6 +237,9 @@ def main() -> int:
         except RuntimeError as e:
             print(f"{path.name[:38]:38s} ERROR {e}")
             continue
+        first_visible: Optional[float] = None
+        if json_updates:
+            events, first_visible = parse_json_updates(events)
         out = "".join(s for _, s in events)
         cover, extra, gap = compare(ref, out, dur)
         row = {"file": path.name, "dur": round(dur, 1), "cover": round(cover, 4),
@@ -207,7 +247,8 @@ def main() -> int:
                "ref_chars": len(normalize_text(ref)), "out_chars": len(normalize_text(out))}
         line = f"{path.name[:38]:38s} {dur:6.1f} {cover:6.1%} {extra:6.1%} {gap:5.1f}s"
         if args.pace:
-            first: Optional[float] = next((t for t, s in events if s.strip()), None)
+            first: Optional[float] = first_visible if json_updates else next(
+                (t for t, s in events if s.strip()), None)
             before = [(t, s) for t, s in events if t < t_close]
             stuck = len(normalize_text("".join(s for t, s in events if t >= t_close)))
             last_before = max((t for t, s in before if s.strip()), default=None)
