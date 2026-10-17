@@ -1424,6 +1424,16 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     #define QWEN_STREAM_SILENCE_RATIO 1.8f
     #define QWEN_STREAM_RMS_HIST_LEN 16
     #define QWEN_STREAM_MAX_SILENCE_SKIPS 60
+    /* Pause test for the flush and the pause reset. The chunk test above
+     * calls the quieter part of continuous speech silent; this one compares
+     * 30 ms frames with the noise floor, which in speech falls between words. */
+    #define QWEN_STREAM_EP_FRAME 480
+    #define QWEN_STREAM_EP_HIST 2000
+    #define QWEN_STREAM_EP_MIN_HIST 100
+    #define QWEN_STREAM_EP_FLOOR_PCT 10
+    #define QWEN_STREAM_EP_SPEECH_RATIO 3.0f
+    #define QWEN_STREAM_EP_MIN_SPEECH_RMS 0.001f
+    #define QWEN_STREAM_EP_SEC 1.0
 
     if (qwen_verbose >= 2) {
         if (live)
@@ -1555,6 +1565,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int chunk_idx = 0;
     int64_t audio_cursor = 0;
     int64_t decoded_cursor = 0;   /* audio_cursor at the last decoded step */
+    /* Audio before this has all its text emitted. A reset that drops held
+     * text (to decode it again) does not move it. */
+    int64_t emitted_cursor = 0;
     /* After a restart that keeps audio, the next step decodes that audio
      * again; it counts as new for the step's token limit. */
 #define STREAM_REDECODE_FROM_KEPT() do { \
@@ -1577,16 +1590,23 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int rms_hist_pos = 0;
     int rms_hist_count = 0;
     int consecutive_silence_skips = 0;
+    float *ep_hist = (float *)malloc(QWEN_STREAM_EP_HIST * sizeof(float));
+    float *ep_sorted = (float *)malloc(QWEN_STREAM_EP_HIST * sizeof(float));
+    int ep_hist_pos = 0;
+    int ep_hist_count = 0;
+    double trail_sil_sec = 0;       /* audio at the end with no speech frame */
+    int chunk_no_speech = 0;        /* the pause test found no speech in this chunk */
+    int known_text_before = 0;
     /* The first text after a restart can lack its leading space. */
     int seam_space = 0;
     /* After a pause the text before it would keep shaping what follows, so
-     * it is dropped. The silence test is relative and a quiet speaker can
-     * pass it: windows overlapping the silent run are kept and re-decoded.
-     * Without --language the language header goes too: the speaker may
-     * have switched. */
+     * it is dropped; without --language the language header too, as the
+     * speaker may have switched. Audio whose text is out is silenced before
+     * it is encoded again: aligned against it, new sentences that repeat
+     * earlier wording would be dropped. Audio decoded but not yet emitted is
+     * decoded again and aligned. */
     double pause_reset_sec = ctx->stream_pause_reset_ms / 1000.0;
     double silent_run_sec = 0;
-    int64_t silent_run_start = -1;  /* first sample of the current silent run */
     int pause_reset_done = 0;
 #define STREAM_PAUSE_RESET() do { \
         n_raw_tokens = 0; \
@@ -1594,17 +1614,16 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         min_prefix_raw = 0; \
         held_text_tokens = 0; \
         prev_prefill_len = 0; \
-        int keep_ = 0; \
-        if (silent_run_start >= 0) { \
-            for (int w_ = n_enc_cache - 1; w_ >= enc_cache_start; w_--) { \
-                if (enc_cache[w_].start_sample + enc_cache[w_].n_samples > silent_run_start) keep_++; \
-                else break; \
-            } \
-        } \
         stream_trim_enc_cache(enc_cache, n_enc_cache, &enc_cache_start, \
-                              &enc_cached_seq_total, keep_); \
+                              &enc_cached_seq_total, 0); \
+        if (local_samples) { \
+            int64_t mf_ = next_window_start > local_base_sample ? next_window_start : local_base_sample; \
+            int64_t mt_ = emitted_cursor; \
+            if (mt_ > local_base_sample + local_n_samples) mt_ = local_base_sample + local_n_samples; \
+            for (int64_t m_ = mf_; m_ < mt_; m_++) local_samples[m_ - local_base_sample] = 0.0f; \
+        } \
         quiet_chunks = 0; \
-        stitch_pending = 1; \
+        stitch_pending = emitted_cursor < decoded_cursor; \
         stitch_tries = 0; \
         stitch_hold = 0; \
         STREAM_REDECODE_FROM_KEPT(); \
@@ -1791,15 +1810,66 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     }
                 }
 
-                if (chunk_rms < threshold && held_text_tokens > 0 &&
-                    ctx->stream_idle_flush_ms > 0 && consecutive_silence_skips > 0) {
-                    /* Second silent chunk after speech: decode once so the
-                     * held tail comes out now, not when speech resumes.
-                     * Not the first: "silent" is relative, sentences often
-                     * end softly, and flushing there loses the last word. */
+                int had_speech = 0;
+                chunk_no_speech = 0;
+                int last_speech = -1;
+                int run = 0;
+                double gap_max = 0;           /* longest pause that ended in this chunk */
+                double prev_trail = trail_sil_sec;
+                int n_fr = (int)(chunk_len / QWEN_STREAM_EP_FRAME);
+                float sp_thr = 0;
+                if (ep_hist && ep_sorted && ep_hist_count >= QWEN_STREAM_EP_MIN_HIST) {
+                    memcpy(ep_sorted, ep_hist, (size_t)ep_hist_count * sizeof(float));
+                    qsort(ep_sorted, (size_t)ep_hist_count, sizeof(float), cmp_float_asc);
+                    sp_thr = ep_sorted[ep_hist_count * QWEN_STREAM_EP_FLOOR_PCT / 100] *
+                             QWEN_STREAM_EP_SPEECH_RATIO;
+                    if (sp_thr < QWEN_STREAM_EP_MIN_SPEECH_RMS) sp_thr = QWEN_STREAM_EP_MIN_SPEECH_RMS;
+                }
+                for (int f = 0; f < n_fr && ep_hist; f++) {
+                    const float *fp = audio_samples + chunk_local_off + (int64_t)f * QWEN_STREAM_EP_FRAME;
+                    float fe = 0.0f;
+                    for (int k = 0; k < QWEN_STREAM_EP_FRAME; k++) fe += fp[k] * fp[k];
+                    float fr = sqrtf(fe / QWEN_STREAM_EP_FRAME);
+                    if (sp_thr > 0 && fr > sp_thr) {
+                        double g = (double)run * QWEN_STREAM_EP_FRAME / QWEN_SAMPLE_RATE;
+                        if (last_speech < 0) g += prev_trail;
+                        if (g > gap_max) gap_max = g;
+                        last_speech = f;
+                        run = 0;
+                    } else {
+                        run++;
+                    }
+                    ep_hist[ep_hist_pos] = fr;
+                    ep_hist_pos = (ep_hist_pos + 1) % QWEN_STREAM_EP_HIST;
+                    if (ep_hist_count < QWEN_STREAM_EP_HIST) ep_hist_count++;
+                }
+                if (sp_thr <= 0) {
+                    trail_sil_sec = 0;
+                } else if (last_speech >= 0) {
+                    had_speech = 1;
+                    trail_sil_sec = (double)(n_fr - 1 - last_speech) * QWEN_STREAM_EP_FRAME / QWEN_SAMPLE_RATE;
+                } else {
+                    trail_sil_sec += (double)chunk_len / QWEN_SAMPLE_RATE;
+                }
+                /* A pause that fell between two chunk boundaries is seen
+                 * only once speech resumes; reset before decoding it. */
+                if (had_speech && gap_max >= pause_reset_sec && pause_reset_sec > 0 &&
+                    !pause_reset_done && held_text_tokens == 0 &&
+                    (n_raw_tokens > 0 || n_enc_cache > enc_cache_start)) {
+                    STREAM_PAUSE_RESET();
+                }
+                if (had_speech) pause_reset_done = 0;
+                chunk_no_speech = (sp_thr > 0 && !had_speech);
+                silent_run_sec = trail_sil_sec;
+                if (qwen_verbose >= 2 && sp_thr > 0)
+                    fprintf(stderr, "  Pause test: trailing %.2fs (speech > %.5f)\n",
+                            trail_sil_sec, sp_thr);
+
+                if (trail_sil_sec >= QWEN_STREAM_EP_SEC && held_text_tokens > 0 &&
+                    ctx->stream_idle_flush_ms > 0) {
+                    /* The speaker has paused: decode now so the held tail
+                     * comes out, not when speech resumes. */
                     is_flush = 1;
-                    if (silent_run_start < 0) silent_run_start = chunk_start;
-                    silent_run_sec += (double)chunk_len / QWEN_SAMPLE_RATE;
                 } else if (chunk_rms < threshold &&
                     consecutive_silence_skips < QWEN_STREAM_MAX_SILENCE_SKIPS) {
                     consecutive_silence_skips++;
@@ -1810,8 +1880,6 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                                 chunk_rms, threshold, chunk_idx,
                                 consecutive_silence_skips);
                     }
-                    if (silent_run_start < 0) silent_run_start = chunk_start;
-                    silent_run_sec += (double)chunk_len / QWEN_SAMPLE_RATE;
                     if (!pause_reset_done && pause_reset_sec > 0 && held_text_tokens == 0 &&
                         silent_run_sec >= pause_reset_sec &&
                         (n_raw_tokens > 0 || n_enc_cache > enc_cache_start)) {
@@ -1825,9 +1893,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             }
         }
 
-        if (!is_flush) {
+        if (!is_flush && !(ctx->skip_silence && live && !is_final)) {
             silent_run_sec = 0;
-            silent_run_start = -1;
             pause_reset_done = 0;
         }
 
@@ -1840,6 +1907,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int enc_seq_len = 0;
         float *enc_output = NULL;
         int64_t full_end = (audio_cursor / enc_window_samples) * (int64_t)enc_window_samples;
+        known_text_before = n_emitted_text_tokens + held_text_tokens;
 
         if (!use_enc_cache) {
             if (audio_cursor > INT_MAX) {
@@ -2513,6 +2581,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
 
                 n_stable_text_tokens = candidate_len;
                 held_text_tokens = n_text_tokens - candidate_len;
+                if (held_text_tokens == 0 && !stitch_pending) emitted_cursor = decoded_cursor;
                 if (ctx->past_text_conditioning && candidate_len > 0 &&
                     text_start + candidate_len > min_prefix_raw) {
                     min_prefix_raw = text_start + candidate_len;
@@ -2621,9 +2690,17 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     last_trim_chunk = chunk_idx;
                     seam_space = 1;
                 }
-                /* A flushed silent chunk can already be a long enough pause
-                 * (with 4 s chunks a single one is). */
-                if (is_flush && !did_periodic_reset && !recovery_reset && !quiet_reset &&
+                /* New words in a chunk with no speech frame: speech too
+                 * quiet for the frame test (low-SNR radio, say). Not a pause. */
+                if (chunk_no_speech &&
+                    n_emitted_text_tokens + held_text_tokens >= known_text_before + 2) {
+                    trail_sil_sec = 0;
+                    silent_run_sec = 0;
+                    pause_reset_done = 0;
+                }
+                /* A decoded chunk can already end in a long enough pause
+                 * (with 4 s chunks a single one can). */
+                if ((is_flush || held_text_tokens == 0) && !did_periodic_reset && !recovery_reset && !quiet_reset &&
                     !pause_reset_done && pause_reset_sec > 0 &&
                     silent_run_sec >= pause_reset_sec) {
                     STREAM_PAUSE_RESET();
@@ -2753,6 +2830,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     free(stable_text_tokens);
     free(emitted_text_tokens);
     free(upd_commit.buf);
+    free(ep_hist);
+    free(ep_sorted);
     free(upd_tail.buf);
     free(upd_last_tail.buf);
     qwen_tokenizer_free(tokenizer);
