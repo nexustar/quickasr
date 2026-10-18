@@ -37,7 +37,7 @@ ffmpeg -i audio.mp3 -f s16le -ar 16000 -ac 1 - 2>/dev/null | \
 ## Features
 
 - **Almost zero dependencies**: Pure C implementation. Only needs BLAS (Accelerate on macOS, OpenBLAS on Linux).
-- **Both models**: Automatically detects Qwen3-ASR-0.6B or 1.7B from the weight files.
+- **Both models**: Automatically detects Qwen3-ASR-0.6B or 1.7B from the weight files. Both the original repos and the transformers-native `-hf` repos (`Qwen/Qwen3-ASR-0.6B-hf`, `Qwen/Qwen3-ASR-1.7B-hf`) load as-is.
 - **Streaming output**: Tokens are printed to stdout as they are generated, word by word, even in offline mode (no `--stream`).
 - **Streaming mode**: `--stream` processes audio in chunks with prefix rollback. A sliding window bounds encoder and decoder context for indefinite streaming.
 - **Monitor mode**: `--monitor` shows inline Unicode symbols on stderr for real-time pipeline diagnostics.
