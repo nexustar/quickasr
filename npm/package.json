@@ -9,10 +9,14 @@
   },
   "homepage": "https://github.com/nexustar/qwen-asr",
   "keywords": ["asr", "speech-to-text", "qwen", "qwen3-asr", "transcription"],
+  "main": "index.js",
+  "types": "index.d.ts",
   "bin": {
     "qwen-asr": "bin/qwen-asr.js"
   },
   "files": [
+    "index.js",
+    "index.d.ts",
     "bin",
     "prebuilds",
     "LICENSE"

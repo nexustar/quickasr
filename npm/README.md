@@ -34,6 +34,23 @@ qwen-asr -h
 See the [repository README](https://github.com/nexustar/qwen-asr#readme) for
 all options (segmented mode, streaming, language forcing, ...).
 
+## From Node
+
+Programs that run the binary themselves (rather than through the `qwen-asr`
+launcher) can get its path:
+
+```js
+const { binaryPath } = require('qwen-asr');
+
+const bin = binaryPath();  // e.g. .../prebuilds/darwin-arm64/qwen_asr
+```
+
+`binaryPath()` picks the arm64 binary for x64 Node under Rosetta, and throws
+an Error with `code` `QWEN_ASR_UNSUPPORTED_PLATFORM` (no binary for this
+OS / CPU architecture) or `QWEN_ASR_UNSUPPORTED_CPU` (CPU below the build
+baseline) when none can run here. Add the package to `optionalDependencies`
+so installs on other platforms still succeed.
+
 ## License
 
 MIT. The Linux binaries statically link OpenBLAS (BSD-3-Clause, see
