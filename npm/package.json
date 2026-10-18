@@ -21,7 +21,7 @@
     "prebuilds",
     "LICENSE"
   ],
-  "os": ["linux", "darwin"],
+  "os": ["linux", "darwin", "win32"],
   "cpu": ["x64", "arm64"],
   "engines": {
     "node": ">=16"

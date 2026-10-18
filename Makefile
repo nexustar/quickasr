@@ -14,7 +14,11 @@ UNAME_S := $(shell uname -s)
 SRCS = qwen_asr.c qwen_asr_kernels.c qwen_asr_kernels_generic.c qwen_asr_kernels_neon.c qwen_asr_kernels_avx.c qwen_asr_audio.c qwen_asr_encoder.c qwen_asr_decoder.c qwen_asr_tokenizer.c qwen_asr_safetensors.c
 OBJS = $(SRCS:.c=.o)
 MAIN = main.c
+ifeq ($(OS),Windows_NT)
+TARGET = qwen_asr.exe
+else
 TARGET = qwen_asr
+endif
 
 # Debug build flags
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
@@ -40,14 +44,19 @@ help:
 	@echo "Example: make blas && ./qwen_asr -d model_dir -i audio.wav"
 
 # =============================================================================
-# Backend: blas (Accelerate on macOS, OpenBLAS on Linux)
+# Backend: blas (Accelerate on macOS, OpenBLAS on Linux and Windows)
 # =============================================================================
 ifeq ($(UNAME_S),Darwin)
 blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK
 blas: LDFLAGS += -framework Accelerate
 else
 # Override to link a custom OpenBLAS
+ifeq ($(OS),Windows_NT)
+# MSYS2 MinGW shell (UCRT64 / MINGW64)
+OPENBLAS_CFLAGS ?= -I$(MINGW_PREFIX)/include/openblas
+else
 OPENBLAS_CFLAGS ?= -I/usr/include/openblas
+endif
 OPENBLAS_LIBS ?= -lopenblas
 blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_OPENBLAS $(OPENBLAS_CFLAGS)
 blas: LDFLAGS := $(OPENBLAS_LIBS) $(LDFLAGS)
@@ -78,7 +87,7 @@ debug:
 # Utilities
 # =============================================================================
 clean:
-	rm -f $(OBJS) main.o $(TARGET)
+	rm -f $(OBJS) main.o qwen_asr qwen_asr.exe
 
 info:
 	@echo "Platform: $(UNAME_S)"

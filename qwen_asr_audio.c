@@ -18,6 +18,17 @@
 #include <string.h>
 #include <math.h>
 #include <limits.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
+/* Windows opens stdin in text mode, which mangles \r\n and stops at 0x1A */
+static void stdin_set_binary(void) {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
+}
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -192,6 +203,7 @@ float *qwen_read_pcm_stdin(int *out_n_samples) {
     size_t size = 0;
     uint8_t *buf = (uint8_t *)malloc(capacity);
     if (!buf) return NULL;
+    stdin_set_binary();
     while (1) {
         if (size == capacity) {
             capacity *= 2;
@@ -498,6 +510,7 @@ qwen_live_audio_t *qwen_live_audio_start_stdin(void) {
      * but a full WAV header is typically 44 bytes. Read up to 4096 to cover
      * any extended header chunks before the data chunk. */
     uint8_t header[4096];
+    stdin_set_binary();
     /* Unbuffered, so stdio holds nothing back from the reader thread's read(). */
     setvbuf(stdin, NULL, _IONBF, 0);
     size_t hdr_read = fread(header, 1, sizeof(header), stdin);

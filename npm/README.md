@@ -18,6 +18,8 @@ Supported platforms:
 - On Linux, OpenBLAS is statically linked; no other runtime dependencies.
 - macOS 13.3+ on Apple Silicon or Intel (every Intel Mac that runs macOS 13
   has the AVX2/FMA the binary needs), using the system Accelerate framework.
+- Windows x86-64 with AVX2/FMA (x86-64-v3, Haswell or newer). OpenBLAS and
+  the MinGW runtime are statically linked; no DLLs to install.
 
 ## Usage
 

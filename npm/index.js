@@ -37,7 +37,8 @@ function unsupported(code, message) {
 // run here.
 function binaryPath() {
   const key = platformKey();
-  const bin = path.join(__dirname, 'prebuilds', key, 'qwen_asr');
+  const exe = process.platform === 'win32' ? 'qwen_asr.exe' : 'qwen_asr';
+  const bin = path.join(__dirname, 'prebuilds', key, exe);
   if (!fs.existsSync(bin)) {
     throw unsupported('QWEN_ASR_UNSUPPORTED_PLATFORM', `no prebuilt binary for ${key}`);
   }

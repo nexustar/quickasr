@@ -1,6 +1,6 @@
 # Qwen3-ASR Pure C Implementation
 
-This is a C implementation of the inference pipeline for [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) speech-to-text models (both 0.6B and 1.7B). It has zero external dependencies beyond the C standard library and a BLAS implementation (Accelerate on macOS, OpenBLAS on Linux). Tokens stream to stdout as they are generated. The implementation runs at speed multiple of the file length even in very modest hardware, like low end Intel or AMD processor.
+This is a C implementation of the inference pipeline for [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) speech-to-text models (both 0.6B and 1.7B). It has zero external dependencies beyond the C standard library and a BLAS implementation (Accelerate on macOS, OpenBLAS on Linux and Windows). Tokens stream to stdout as they are generated. The implementation runs at speed multiple of the file length even in very modest hardware, like low end Intel or AMD processor.
 
 **Important**: this implementation explicitly **avoids implementing support for MPS**. Transcription systems are very important pieces of infrastructure, and are often run on remote Linux servers. Adding the MPS target would focus the efforts too much on Apple hardware, so for now I'm skipping it. The code runs very well anyway on Apple hardware (NEON optimized). Please, **don't send pull requests** about this feature, fork the code instead, in order to add MPS support. I'll add it much later when the other optimizations are already mature.
 
@@ -36,7 +36,7 @@ ffmpeg -i audio.mp3 -f s16le -ar 16000 -ac 1 - 2>/dev/null | \
 
 ## Features
 
-- **Almost zero dependencies**: Pure C implementation. Only needs BLAS (Accelerate on macOS, OpenBLAS on Linux).
+- **Almost zero dependencies**: Pure C implementation. Only needs BLAS (Accelerate on macOS, OpenBLAS on Linux and Windows).
 - **Both models**: Automatically detects Qwen3-ASR-0.6B or 1.7B from the weight files. Both the original repos and the transformers-native `-hf` repos (`Qwen/Qwen3-ASR-0.6B-hf`, `Qwen/Qwen3-ASR-1.7B-hf`) load as-is.
 - **Streaming output**: Tokens are printed to stdout as they are generated, word by word, even in offline mode (no `--stream`).
 - **Streaming mode**: `--stream` processes audio in chunks with prefix rollback. A sliding window bounds encoder and decoder context for indefinite streaming.
@@ -413,7 +413,7 @@ Per sample, the tool reports two distances:
 ## Building
 
 ```bash
-make blas       # BLAS acceleration (Accelerate on macOS, OpenBLAS on Linux)
+make blas       # BLAS acceleration (Accelerate on macOS, OpenBLAS on Linux and Windows)
 make test       # Run regression checks (requires built binary + model files)
 make test-stream-cache  # Check stream cache on/off equivalence
 make clean      # Clean build artifacts
@@ -428,11 +428,18 @@ sudo apt install libopenblas-dev
 sudo dnf install openblas-devel
 ```
 
+For Windows, build in an [MSYS2](https://www.msys2.org/) UCRT64 shell
+(MSVC is not supported):
+```bash
+pacman -S make mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-openblas
+make blas       # produces qwen_asr.exe
+```
+
 ### Prebuilt binary (npm)
 
 Linux x86-64 with AVX2/FMA (Haswell or newer) or Linux arm64 with ARMv8.2
-(Cortex-A55/A76 or newer, Asahi Linux), both with glibc >= 2.28, or macOS
-13.3+ (Apple Silicon or Intel):
+(Cortex-A55/A76 or newer, Asahi Linux), both with glibc >= 2.28, macOS
+13.3+ (Apple Silicon or Intel), or Windows x86-64 with AVX2/FMA:
 ```bash
 npm install -g qwen-asr
 qwen-asr -d qwen3-asr-0.6b -i samples/jfk.wav
@@ -440,7 +447,9 @@ qwen-asr -d qwen3-asr-0.6b -i samples/jfk.wav
 
 Release binaries are built by `scripts/build-linux.sh` (inside
 `manylinux_2_28`; x86-64-v3 or ARMv8.2, OpenBLAS linked statically) and
-`scripts/build-darwin.sh` (Apple M1 or x86-64-v3, Accelerate). The Makefile
+`scripts/build-darwin.sh` (Apple M1 or x86-64-v3, Accelerate) and
+`scripts/build-windows.sh` (MSYS2 UCRT64; x86-64-v3, OpenBLAS and MinGW
+runtime linked statically). The Makefile
 accepts the same overrides for custom builds:
 ```bash
 make blas ARCH_FLAGS=-march=x86-64-v3 OPENBLAS_CFLAGS=-I/opt/openblas/include \

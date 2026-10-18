@@ -7,11 +7,60 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <dirent.h>
+#endif
+
+/* ========================================================================
+ * Read-only file mapping
+ * ======================================================================== */
+
+#ifdef _WIN32
+static void *map_file(const char *path, size_t *out_size) {
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return NULL;
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(f, &size) || size.QuadPart < 8) { CloseHandle(f); return NULL; }
+    HANDLE m = CreateFileMappingA(f, NULL, PAGE_READONLY, 0, 0, NULL);
+    CloseHandle(f);
+    if (!m) return NULL;
+    /* The view keeps the mapping alive after its handle is closed */
+    void *data = MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(m);
+    if (!data) return NULL;
+    *out_size = (size_t)size.QuadPart;
+    return data;
+}
+
+static void unmap_file(void *data, size_t size) {
+    (void)size;
+    UnmapViewOfFile(data);
+}
+#else
+static void *map_file(const char *path, size_t *out_size) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+    struct stat st;
+    if (fstat(fd, &st) < 0 || st.st_size < 8) { close(fd); return NULL; }
+    size_t size = (size_t)st.st_size;
+    void *data = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (data == MAP_FAILED) return NULL;
+    *out_size = size;
+    return data;
+}
+
+static void unmap_file(void *data, size_t size) {
+    munmap(data, size);
+}
+#endif
 
 /* ========================================================================
  * Minimal JSON parser for safetensors header
@@ -192,25 +241,16 @@ static int parse_header(safetensors_file_t *sf) {
  * ======================================================================== */
 
 safetensors_file_t *safetensors_open(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return NULL;
-
-    struct stat st;
-    if (fstat(fd, &st) < 0) { close(fd); return NULL; }
-
-    size_t file_size = (size_t)st.st_size;
-    if (file_size < 8) { close(fd); return NULL; }
-
-    void *data = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (data == MAP_FAILED) return NULL;
+    size_t file_size = 0;
+    void *data = map_file(path, &file_size);
+    if (!data) return NULL;
 
     uint64_t header_size = 0;
     memcpy(&header_size, data, 8);
-    if (header_size > file_size - 8) { munmap(data, file_size); return NULL; }
+    if (header_size > file_size - 8) { unmap_file(data, file_size); return NULL; }
 
     safetensors_file_t *sf = calloc(1, sizeof(safetensors_file_t));
-    if (!sf) { munmap(data, file_size); return NULL; }
+    if (!sf) { unmap_file(data, file_size); return NULL; }
 
     sf->path = strdup(path);
     sf->data = data;
@@ -229,7 +269,7 @@ safetensors_file_t *safetensors_open(const char *path) {
 
 void safetensors_close(safetensors_file_t *sf) {
     if (!sf) return;
-    if (sf->data) munmap(sf->data, sf->file_size);
+    if (sf->data) unmap_file(sf->data, sf->file_size);
     free(sf->path);
     free(sf->header_json);
     free(sf);

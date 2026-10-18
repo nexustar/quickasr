@@ -60,13 +60,42 @@ jobs:
           path: npm/prebuilds/
           if-no-files-found: error
 
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: make perl curl mingw-w64-ucrt-x86_64-gcc
+
+      - uses: actions/cache@v6
+        with:
+          path: .openblas
+          key: openblas-win32-x64-${{ hashFiles('scripts/build-windows.sh') }}
+
+      - run: scripts/build-windows.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prebuild-win32-x64
+          path: npm/prebuilds/
+          if-no-files-found: error
+
   test:
-    needs: [build-linux, build-darwin]
+    needs: [build-linux, build-darwin, build-windows]
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
@@ -76,7 +105,7 @@ jobs:
           path: npm/prebuilds/
           merge-multiple: true
 
-      - run: chmod +x npm/prebuilds/*/qwen_asr
+      - run: chmod +x npm/prebuilds/*/qwen_asr*
 
       - uses: actions/cache@v6
         with:
@@ -114,7 +143,7 @@ jobs:
           merge-multiple: true
 
       - run: |
-          chmod +x npm/prebuilds/*/qwen_asr
+          chmod +x npm/prebuilds/*/qwen_asr*
           cp LICENSE npm/LICENSE
           ls -lR npm/prebuilds
 

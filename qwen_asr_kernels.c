@@ -15,6 +15,8 @@
 #endif
 #ifdef __APPLE__
 #include <sys/sysctl.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -122,6 +124,9 @@ int qwen_get_num_cpus(void) {
     int n = 0;
     size_t len = sizeof(n);
     sysctlbyname("hw.ncpu", &n, &len, NULL, 0);
+    return n > 0 ? n : 1;
+#elif defined(_WIN32)
+    int n = (int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     return n > 0 ? n : 1;
 #else
     int n = (int)sysconf(_SC_NPROCESSORS_ONLN);
