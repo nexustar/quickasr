@@ -899,12 +899,43 @@ void qwen_silu(float *x, int n) {
     }
 }
 
+/* tanh-approximation GELU, 256 values at a time so the tanh can go through
+ * vForce on Apple. */
+static void gelu_range(float *x, int n) {
+    float inner[256];
+    for (int i = 0; i < n; i += 256) {
+        int m = n - i < 256 ? n - i : 256;
+        float *v = x + i;
+        for (int j = 0; j < m; j++)
+            inner[j] = 0.7978845608028654f * (v[j] + 0.044715f * v[j] * v[j] * v[j]);
+#if defined(USE_BLAS) && defined(__APPLE__)
+        vvtanhf(inner, inner, &m);
+#else
+        for (int j = 0; j < m; j++) inner[j] = tanhf(inner[j]);
+#endif
+        for (int j = 0; j < m; j++) v[j] = 0.5f * v[j] * (1.0f + inner[j]);
+    }
+}
+
+typedef struct {
+    float *x;
+    int n;
+} gelu_task_t;
+
+static void gelu_worker(int tid, int n_threads, void *arg) {
+    gelu_task_t *t = (gelu_task_t *)arg;
+    int chunk = ((t->n + n_threads - 1) / n_threads + 255) & ~255;
+    int start = tid * chunk;
+    int end = start + chunk < t->n ? start + chunk : t->n;
+    if (start < end) gelu_range(t->x + start, end - start);
+}
+
 void qwen_gelu(float *x, int n) {
-    for (int i = 0; i < n; i++) {
-        float val = x[i];
-        float x3 = val * val * val;
-        float inner = 0.7978845608028654f * (val + 0.044715f * x3);
-        x[i] = 0.5f * val * (1.0f + tanhf(inner));
+    if (tp.n_threads > 1 && n >= 16384) {
+        gelu_task_t task = { x, n };
+        parallel_for(gelu_worker, &task);
+    } else {
+        gelu_range(x, n);
     }
 }
 
