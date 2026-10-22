@@ -565,6 +565,139 @@ int qwen_argmax_matvec_bf16_excl(const float *x, const uint16_t *W_bf16,
     return v2 > v1 ? b2 : b1;
 }
 
+/* ========================================================================
+ * Multi-vector bf16 matvec (a few tokens in one pass over the weights)
+ *
+ * Each thread takes the same row range as the single-vector kernels above and
+ * walks it in blocks of an even number of rows, applying every vector to a
+ * block while it is in cache. Per-row arithmetic, including which rows the
+ * NEON kernel pairs, is unchanged, so results are bitwise those of nx
+ * single-vector calls.
+ * ======================================================================== */
+
+#define QWEN_MULTI_ROW_BLOCK 32
+
+static void matvec_multi_range(float *y, int ldy, const float *x, int ldx,
+                               const uint16_t *W, int in_dim, int start, int end, int nx) {
+    for (int b0 = start; b0 < end; b0 += QWEN_MULTI_ROW_BLOCK) {
+        int b1 = b0 + QWEN_MULTI_ROW_BLOCK < end ? b0 + QWEN_MULTI_ROW_BLOCK : end;
+        for (int r = 0; r < nx; r++)
+            bf16_matvec_fused(y + (size_t)r * ldy + b0, x + (size_t)r * ldx,
+                              W + (size_t)b0 * in_dim, NULL, in_dim, b1 - b0);
+    }
+}
+
+typedef struct {
+    float *y[3];
+    const uint16_t *W[3];
+    int rows[3];
+    int ldy[3];
+    int n_seg;
+    const float *x;
+    int ldx;
+    int in_dim;
+    int nx;
+} matvec_multi_task_t;
+
+/* Segments split like matvec_worker (one segment) or qkv_matvec_worker (three). */
+static void matvec_multi_worker(int tid, int n_threads, void *arg) {
+    matvec_multi_task_t *t = (matvec_multi_task_t *)arg;
+    int total = 0;
+    for (int s = 0; s < t->n_seg; s++) total += t->rows[s];
+    int chunk = (total + n_threads - 1) / n_threads;
+    int start = tid * chunk;
+    int end = start + chunk < total ? start + chunk : total;
+    int base = 0;
+    for (int s = 0; s < t->n_seg; s++) {
+        int seg_end = base + t->rows[s];
+        int a = start > base ? start - base : 0;
+        int e = (end < seg_end ? end : seg_end) - base;
+        if (a < e)
+            matvec_multi_range(t->y[s], t->ldy[s], t->x, t->ldx, t->W[s],
+                               t->in_dim, a, e, t->nx);
+        base = seg_end;
+    }
+}
+
+static void matvec_multi_run(matvec_multi_task_t *task) {
+    if (tp.n_threads <= 1) matvec_multi_worker(0, 1, task);
+    else parallel_for(matvec_multi_worker, task);
+}
+
+void qwen_matvec_bf16_multi(float *y, int ldy, const float *x, int ldx,
+                            const uint16_t *W_bf16, int in_dim, int out_dim, int nx) {
+    matvec_multi_task_t task = {
+        .y = { y }, .W = { W_bf16 }, .rows = { out_dim }, .ldy = { ldy }, .n_seg = 1,
+        .x = x, .ldx = ldx, .in_dim = in_dim, .nx = nx,
+    };
+    matvec_multi_run(&task);
+}
+
+void qwen_matvec_bf16_qkv_multi(float *q, float *k, float *v, const float *x, int ldx,
+                                const uint16_t *Wq_bf16, const uint16_t *Wk_bf16,
+                                const uint16_t *Wv_bf16,
+                                int in_dim, int q_dim, int kv_dim, int nx) {
+    matvec_multi_task_t task = {
+        .y = { q, k, v }, .W = { Wq_bf16, Wk_bf16, Wv_bf16 },
+        .rows = { q_dim, kv_dim, kv_dim }, .ldy = { q_dim, kv_dim, kv_dim }, .n_seg = 3,
+        .x = x, .ldx = ldx, .in_dim = in_dim, .nx = nx,
+    };
+    matvec_multi_run(&task);
+}
+
+typedef struct {
+    const float *x;
+    int ldx;
+    const uint16_t *W_bf16;
+    int in_dim;
+    int out_dim;
+    int nx;
+    int *best_idx;      /* [QWEN_MAX_THREADS][nx] */
+    float *best_val;
+} argmax_multi_task_t;
+
+static void argmax_multi_worker(int tid, int n_threads, void *arg) {
+    argmax_multi_task_t *t = (argmax_multi_task_t *)arg;
+    int chunk = (t->out_dim + n_threads - 1) / n_threads;
+    int start = tid * chunk;
+    int end = start + chunk < t->out_dim ? start + chunk : t->out_dim;
+    int *bi = t->best_idx + (size_t)tid * t->nx;
+    float *bv = t->best_val + (size_t)tid * t->nx;
+    for (int r = 0; r < t->nx; r++) { bi[r] = 0; bv[r] = -1e30f; }
+    /* Strict > across blocks in row order keeps the first maximum, as the
+     * single-vector scan does. */
+    for (int b0 = start; b0 < end; b0 += QWEN_MULTI_ROW_BLOCK) {
+        int b1 = b0 + QWEN_MULTI_ROW_BLOCK < end ? b0 + QWEN_MULTI_ROW_BLOCK : end;
+        for (int r = 0; r < t->nx; r++) {
+            int b;
+            float val;
+            argmax_bf16_range(t->x + (size_t)r * t->ldx, t->W_bf16, t->in_dim, b0, b1, &b, &val);
+            if (b0 == start || val > bv[r]) { bv[r] = val; bi[r] = b; }
+        }
+    }
+}
+
+void qwen_argmax_matvec_bf16_multi(const float *x, int ldx, const uint16_t *W_bf16,
+                                   int in_dim, int out_dim, int nx, int *best) {
+    int nt = tp.n_threads > 1 ? tp.n_threads : 1;
+    int best_idx[QWEN_MAX_THREADS * QWEN_MULTI_MAX_X];
+    float best_val[QWEN_MAX_THREADS * QWEN_MULTI_MAX_X];
+    argmax_multi_task_t task = { x, ldx, W_bf16, in_dim, out_dim, nx, best_idx, best_val };
+    if (nt == 1) argmax_multi_worker(0, 1, &task);
+    else parallel_for(argmax_multi_worker, &task);
+    for (int r = 0; r < nx; r++) {
+        int b = best_idx[r];
+        float v = best_val[r];
+        for (int i = 1; i < nt; i++) {
+            if (best_val[i * nx + r] > v) {
+                v = best_val[i * nx + r];
+                b = best_idx[i * nx + r];
+            }
+        }
+        best[r] = b;
+    }
+}
+
 void qwen_matmul_t_bf16(float *C, const float *A, const uint16_t *B_bf16,
                          int M, int K, int N) {
     if (M == 1) {

@@ -481,6 +481,97 @@ int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
     return qwen_argmax_matvec_bf16(x, dec->tok_embeddings_bf16, dim, cfg->vocab_size);
 }
 
+/* Row buffers for qwen_decoder_forward_batch, grown on demand. */
+static float *bx, *bx_norm, *bq, *bk, *bv, *battn, *bproj, *bgate, *bffn;
+static int b_cap = 0, b_dim = 0;
+
+static int ensure_batch_buffers(const qwen_config_t *cfg, int n) {
+    if (n <= b_cap) return 0;
+    int dim = cfg->dec_hidden;
+    int q_dim = cfg->dec_heads * cfg->dec_head_dim;
+    int kv_dim = cfg->dec_kv_heads * cfg->dec_head_dim;
+    int inter = cfg->dec_intermediate;
+#define GROW(p, cnt) do { void *t_ = realloc((p), (size_t)(cnt) * n * sizeof(float)); \
+                          if (!t_) return -1; (p) = (float *)t_; } while (0)
+    GROW(bx, dim); GROW(bx_norm, dim); GROW(bq, q_dim); GROW(bk, kv_dim); GROW(bv, kv_dim);
+    GROW(battn, q_dim); GROW(bproj, dim); GROW(bgate, 2 * inter); GROW(bffn, dim);
+#undef GROW
+    b_cap = n;
+    return 0;
+}
+
+int qwen_decoder_forward_batch(qwen_ctx_t *ctx, const float *embeds, int n, int *pred) {
+    qwen_decoder_t *dec = &ctx->decoder;
+    const qwen_config_t *cfg = &ctx->config;
+    int dim = cfg->dec_hidden;
+    int n_heads = cfg->dec_heads;
+    int n_kv_heads = cfg->dec_kv_heads;
+    int head_dim = cfg->dec_head_dim;
+    int inter = cfg->dec_intermediate;
+    float eps = cfg->dec_rms_norm_eps;
+    int q_dim = n_heads * head_dim;
+    int kv_dim = n_kv_heads * head_dim;
+
+    if (n < 1 || n > QWEN_MULTI_MAX_X || ensure_batch_buffers(cfg, n) != 0) return -1;
+    int pos = ctx->kv_cache_len;
+    if (pos + n > ctx->kv_cache_max && kv_cache_grow(ctx, pos + n + 1024) != 0) return -1;
+    if (ensure_rope_cache(ctx, pos + n, head_dim, cfg->dec_rope_theta) != 0) return -1;
+    const float *rope_cos = ctx->rope_cache_cos + (size_t)pos * head_dim;
+    const float *rope_sin = ctx->rope_cache_sin + (size_t)pos * head_dim;
+    float scale = 1.0f / sqrtf((float)head_dim);
+
+    b_dim = dim;
+    memcpy(bx, embeds, (size_t)n * dim * sizeof(float));
+
+    /* Same operations as qwen_decoder_forward, row by row where that path
+     * would differ (attention, in-place SwiGLU). */
+    for (int layer = 0; layer < cfg->dec_layers; layer++) {
+        qwen_dec_layer_t *l = &dec->layers[layer];
+
+        qwen_rms_norm(bx_norm, bx, l->input_norm, n, dim, eps);
+        qwen_matvec_bf16_qkv_multi(bq, bk, bv, bx_norm, dim,
+                                   l->wq_weight_bf16, l->wk_weight_bf16, l->wv_weight_bf16,
+                                   dim, q_dim, kv_dim, n);
+        qwen_rms_norm_per_head(bq, l->q_norm_weight, n, n_heads, head_dim, eps);
+        qwen_rms_norm_per_head(bk, l->k_norm_weight, n, n_kv_heads, head_dim, eps);
+        qwen_apply_rope_neox(bq, rope_cos, rope_sin, n, n_heads, head_dim);
+        qwen_apply_rope_neox(bk, rope_cos, rope_sin, n, n_kv_heads, head_dim);
+
+        for (int r = 0; r < n; r++) {
+            memcpy(kv_cache_k_at(ctx, layer, pos + r), bk + (size_t)r * kv_dim, kv_dim * sizeof(float));
+            memcpy(kv_cache_v_at(ctx, layer, pos + r), bv + (size_t)r * kv_dim, kv_dim * sizeof(float));
+        }
+        float *full_k = kv_cache_k_at(ctx, layer, 0);
+        float *full_v = kv_cache_v_at(ctx, layer, 0);
+        for (int r = 0; r < n; r++)
+            qwen_causal_attention(battn + (size_t)r * q_dim, bq + (size_t)r * q_dim,
+                                  full_k, full_v, 1, pos + r + 1, n_heads, n_kv_heads,
+                                  head_dim, scale, pos + r);
+
+        qwen_matvec_bf16_multi(bproj, dim, battn, q_dim, l->wo_weight_bf16, q_dim, dim, n);
+        qwen_add_inplace(bx, bproj, n * dim);
+
+        qwen_rms_norm(bx_norm, bx, l->post_attn_norm, n, dim, eps);
+        qwen_matvec_bf16_multi(bgate, 2 * inter, bx_norm, dim, l->gate_up_fused_bf16,
+                               dim, 2 * inter, n);
+        for (int r = 0; r < n; r++)
+            qwen_swiglu_multiply(bgate + (size_t)r * 2 * inter, bgate + (size_t)r * 2 * inter,
+                                 1, inter);
+        qwen_matvec_bf16_multi(bffn, dim, bgate, 2 * inter, l->down_weight_bf16, inter, dim, n);
+        qwen_add_inplace(bx, bffn, n * dim);
+    }
+
+    ctx->kv_cache_len = pos + n;
+    qwen_rms_norm(bx, bx, dec->norm, n, dim, eps);
+    qwen_argmax_matvec_bf16_multi(bx, dim, dec->tok_embeddings_bf16, dim, cfg->vocab_size, n, pred);
+    decoder_last_x = bx + (size_t)(n - 1) * dim;
+    return 0;
+}
+
+void qwen_decoder_select_batch_row(int i) {
+    decoder_last_x = bx + (size_t)i * b_dim;
+}
+
 /* The most likely next token other than `excl`, for the step just run. */
 int qwen_decoder_next_excluding(qwen_ctx_t *ctx, int excl) {
     if (!decoder_last_x) return excl;

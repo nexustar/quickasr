@@ -1402,6 +1402,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     if (enc_window_frames < 100) enc_window_frames = 100;
     if (enc_window_frames > 800) enc_window_frames = 800;
     int enc_window_samples = enc_window_frames * QWEN_HOP_LENGTH;
+    const char *no_draft_env = getenv("QWEN_STREAM_NO_DRAFT");
+    int use_draft = !(no_draft_env && no_draft_env[0] != '\0' && strcmp(no_draft_env, "0") != 0);
     const char *no_cache_env = getenv("QWEN_STREAM_NO_ENC_CACHE");
     int use_enc_cache = 1;
     if (no_cache_env && no_cache_env[0] != '\0' && strcmp(no_cache_env, "0") != 0) {
@@ -2329,14 +2331,44 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int loop_breaks = 0;
         int force_recovery = 0;
 
+        /* The previous step already decoded the tokens after this prefix. If the
+         * first new token matches, run them as one batch; steps that feed them
+         * take their prediction from it instead of a single-token forward. */
+        const int *draft = raw_tokens + n_prefix_tokens_full;
+        int n_draft = n_raw_tokens - n_prefix_tokens_full;
+        if (n_draft > QWEN_MULTI_MAX_X) n_draft = QWEN_MULTI_MAX_X;
+        if (n_draft > step_cap) n_draft = step_cap;
+        int draft_pred[QWEN_MULTI_MAX_X];
+        int draft_used = 0, draft_live = 0;
+        int draft_kv_base = ctx->kv_cache_len;
+        if (use_draft && n_draft >= 2 && token == draft[0]) {
+            float *draft_embeds = (float *)malloc((size_t)n_draft * dim * sizeof(float));
+            if (draft_embeds) {
+                for (int i = 0; i < n_draft; i++)
+                    tok_embed_bf16_to_f32(draft_embeds + (size_t)i * dim,
+                                          ctx->decoder.tok_embeddings_bf16, draft[i], dim);
+                draft_live = qwen_decoder_forward_batch(ctx, draft_embeds, n_draft,
+                                                        draft_pred) == 0;
+                free(draft_embeds);
+            }
+            ctx->kv_cache_len = draft_kv_base;
+        }
+
         while (n_generated < step_cap) {
             n_generated++;
             if (token == QWEN_TOKEN_ENDOFTEXT || token == QWEN_TOKEN_IM_END) break;
 
             chunk_tokens[n_chunk_tokens++] = token;
 
-            tok_embed_bf16_to_f32(tmp_embed, ctx->decoder.tok_embeddings_bf16, token, dim);
-            token = qwen_decoder_forward(ctx, tmp_embed);
+            if (draft_live && draft_used < n_draft && token == draft[draft_used]) {
+                ctx->kv_cache_len = draft_kv_base + draft_used + 1;
+                qwen_decoder_select_batch_row(draft_used);
+                token = draft_pred[draft_used++];
+            } else {
+                draft_live = 0;
+                tok_embed_bf16_to_f32(tmp_embed, ctx->decoder.tok_embeddings_bf16, token, dim);
+                token = qwen_decoder_forward(ctx, tmp_embed);
+            }
 
             if (token != QWEN_TOKEN_ENDOFTEXT && token != QWEN_TOKEN_IM_END) {
                 int lb[64];
@@ -2362,6 +2394,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 }
             }
         }
+        if (n_draft >= 2 && qwen_verbose >= 2)
+            fprintf(stderr, "  Draft: %d of %d previous tokens reused\n", draft_used, n_draft);
         if (loop_breaks > 0 && qwen_verbose >= 2)
             fprintf(stderr, "  Loop reset applied (%d)\n", loop_breaks);
         if (loop_breaks > 0 && !force_recovery)

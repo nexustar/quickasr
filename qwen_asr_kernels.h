@@ -51,6 +51,17 @@ void qwen_linear_nobias_bf16_qkv(float *q, float *k, float *v, const float *x,
 void qwen_matmul_t_bf16(float *C, const float *A, const uint16_t *B_bf16,
                          int M, int K, int N);
 
+/* y[r*ldy + o] = W[o] . x[r*ldx] for r < nx <= QWEN_MULTI_MAX_X, one pass over W */
+#define QWEN_MULTI_MAX_X 16
+void qwen_matvec_bf16_multi(float *y, int ldy, const float *x, int ldx,
+                            const uint16_t *W_bf16, int in_dim, int out_dim, int nx);
+void qwen_matvec_bf16_qkv_multi(float *q, float *k, float *v, const float *x, int ldx,
+                                const uint16_t *Wq_bf16, const uint16_t *Wk_bf16,
+                                const uint16_t *Wv_bf16,
+                                int in_dim, int q_dim, int kv_dim, int nx);
+void qwen_argmax_matvec_bf16_multi(const float *x, int ldx, const uint16_t *W_bf16,
+                                   int in_dim, int out_dim, int nx, int *best);
+
 /* ========================================================================
  * 2D Convolution (for audio encoder conv stem)
  * ======================================================================== */

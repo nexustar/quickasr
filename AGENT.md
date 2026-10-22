@@ -153,11 +153,13 @@ Current streaming behavior in `qwen_transcribe_stream()`:
 - Encoder cache for completed local-attention windows
 - Re-encode only current partial tail window
 - Decoder prefill reuse by longest unchanged embedding prefix
+- Rolled-back tokens from the previous step checked in one decoder pass (draft reuse)
 - Prefix rollback policy for token stability
 - Monotonic commit frontier (no retracting already-emitted text)
 
 Debug/env switch:
 - `QWEN_STREAM_NO_ENC_CACHE=1` disables encoder window cache (debug/regression only)
+- `QWEN_STREAM_NO_DRAFT=1` disables reusing the previous step's tokens as a one-pass draft (debug/regression only; output is identical either way)
 
 Important caveat:
 - In streaming mode, if no token callback is installed (for example CLI `--silent`),

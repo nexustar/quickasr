@@ -336,6 +336,12 @@ void qwen_decoder_prefill(qwen_ctx_t *ctx, const float *input_embeds, int seq_le
 int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed);
 int qwen_decoder_next_excluding(qwen_ctx_t *ctx, int excl);
 
+/* n <= QWEN_MULTI_MAX_X consecutive qwen_decoder_forward steps in one pass over
+ * the weights; pred[i] is the token the step for embeds[i] returns. */
+int qwen_decoder_forward_batch(qwen_ctx_t *ctx, const float *embeds, int n, int *pred);
+/* Make qwen_decoder_next_excluding refer to row i of the last batch. */
+void qwen_decoder_select_batch_row(int i);
+
 /* Global verbose flag */
 extern int qwen_verbose;
 
