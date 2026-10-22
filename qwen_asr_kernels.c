@@ -121,8 +121,15 @@ void qwen_set_threads(int n) {
 
 int qwen_get_num_cpus(void) {
 #ifdef __APPLE__
+    /* Performance cores only: with the static row split, a thread on an
+     * efficiency core makes the others wait. With fewer than 4 of them the
+     * idle efficiency cores would cost more, so use all cores. */
     int n = 0;
     size_t len = sizeof(n);
+    if (sysctlbyname("hw.perflevel0.physicalcpu", &n, &len, NULL, 0) == 0 && n >= 4)
+        return n;
+    n = 0;
+    len = sizeof(n);
     sysctlbyname("hw.ncpu", &n, &len, NULL, 0);
     return n > 0 ? n : 1;
 #elif defined(_WIN32)

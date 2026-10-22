@@ -167,7 +167,7 @@ int qwen_argmax_matvec_bf16_excl(const float *x, const uint16_t *W_bf16,
  * Creates a persistent thread pool. Call before inference. */
 void qwen_set_threads(int n);
 
-/* Get number of available CPU cores */
+/* Default thread count: CPU cores (performance cores on Apple Silicon) */
 int qwen_get_num_cpus(void);
 
 /* Global verbose flag */

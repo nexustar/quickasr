@@ -84,7 +84,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -i <file>     Input WAV file (16-bit PCM, any sample rate)\n");
     fprintf(stderr, "  --stdin       Read audio from stdin (auto-detect WAV or raw s16le 16kHz mono)\n");
     fprintf(stderr, "\nOptions:\n");
-    fprintf(stderr, "  -t <n>        Number of threads (default: all CPUs)\n");
+    fprintf(stderr, "  -t <n>        Number of threads (default: all CPUs; performance cores on Apple Silicon)\n");
     fprintf(stderr, "  -S <secs>     Segment target seconds (default: 0 = full-audio decode)\n");
     fprintf(stderr, "  -W <secs>     Segment-cutting silence search window ± seconds (default: 3.0)\n");
     fprintf(stderr, "  --stream      Streaming mode: process in chunks with prefix rollback\n");
