@@ -1016,10 +1016,163 @@ static inline void qwen_vec_scale_add(float *dst, const float *src, float correc
     qwen_vec_scale_add_impl(dst, src, correction, n);
 }
 
+/* With Accelerate, attention over many queries is two sgemm calls per head,
+ * claimed through an atomic counter so efficiency cores take fewer. OpenBLAS
+ * keeps the loops below: a threaded OpenBLAS called from every worker is untested. */
+#if defined(USE_BLAS) && defined(__APPLE__)
+#define QWEN_GEMM_ATTENTION 1
+
+static float *attn_scores = NULL;
+static size_t attn_scores_cap = 0;
+
+static float *attn_scores_get(size_t per_thread) {
+    size_t need = (size_t)(tp.n_threads > 1 ? tp.n_threads : 1) * per_thread;
+    if (need > attn_scores_cap) {
+        free(attn_scores);
+        attn_scores = (float *)malloc(need * sizeof(float));
+        attn_scores_cap = attn_scores ? need : 0;
+    }
+    return attn_scores;
+}
+
+/* Softmax over row[0, n); row[n, len) is zeroed (masked keys). */
+static void attn_softmax_row(float *row, int n, int len) {
+    float mx = row[0];
+    for (int j = 1; j < n; j++) if (row[j] > mx) mx = row[j];
+    for (int j = 0; j < n; j++) row[j] -= mx;
+    vvexpf(row, row, &n);
+    float sum = 0.0f;
+    for (int j = 0; j < n; j++) sum += row[j];
+    float inv = 1.0f / sum;
+    for (int j = 0; j < n; j++) row[j] *= inv;
+    for (int j = n; j < len; j++) row[j] = 0.0f;
+}
+
+typedef struct {
+    float *out;
+    const float *Q, *K, *V;
+    int n_heads, head_dim;
+    float scale;
+    const int *window_starts;
+    int n_windows;
+    int max_win;
+    int next_unit;
+    float *scores;
+} gemm_bidir_task_t;
+
+static void gemm_bidir_worker(int tid, int n_threads, void *arg) {
+    (void)n_threads;
+    gemm_bidir_task_t *t = (gemm_bidir_task_t *)arg;
+    int hidden = t->n_heads * t->head_dim;
+    float *S = t->scores + (size_t)tid * t->max_win * t->max_win;
+    int n_units = t->n_heads * t->n_windows;
+
+    for (;;) {
+        int u = __atomic_fetch_add(&t->next_unit, 1, __ATOMIC_RELAXED);
+        if (u >= n_units) break;
+        int h = u % t->n_heads, w = u / t->n_heads;
+        int ws = t->window_starts[w];
+        int len = t->window_starts[w + 1] - ws;
+        if (len <= 0) continue;
+        size_t off = (size_t)ws * hidden + (size_t)h * t->head_dim;
+
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    len, len, t->head_dim, t->scale,
+                    t->Q + off, hidden, t->K + off, hidden, 0.0f, S, len);
+        for (int i = 0; i < len; i++) attn_softmax_row(S + (size_t)i * len, len, len);
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    len, t->head_dim, len, 1.0f,
+                    S, len, t->V + off, hidden, 0.0f, t->out + off, hidden);
+    }
+}
+
+static int gemm_bidirectional_attention(float *out, const float *Q, const float *K,
+                                        const float *V, int n_heads, int head_dim,
+                                        float scale, const int *window_starts,
+                                        int n_windows) {
+    int max_win = 0;
+    for (int w = 0; w < n_windows; w++) {
+        int len = window_starts[w + 1] - window_starts[w];
+        if (len > max_win) max_win = len;
+    }
+    if (max_win <= 0) return -1;
+    float *scores = attn_scores_get((size_t)max_win * max_win);
+    if (!scores) return -1;
+    gemm_bidir_task_t task = {
+        .out = out, .Q = Q, .K = K, .V = V,
+        .n_heads = n_heads, .head_dim = head_dim, .scale = scale,
+        .window_starts = window_starts, .n_windows = n_windows,
+        .max_win = max_win, .next_unit = 0, .scores = scores,
+    };
+    if (tp.n_threads > 1) parallel_for(gemm_bidir_worker, &task);
+    else gemm_bidir_worker(0, 1, &task);
+    return 0;
+}
+
+typedef struct {
+    float *out;
+    const float *Q, *K, *V;
+    int seq_q, seq_k, n_heads, n_kv_heads, head_dim, q_offset;
+    float scale;
+    int next_head;
+    float *scores;
+} gemm_causal_task_t;
+
+static void gemm_causal_worker(int tid, int n_threads, void *arg) {
+    (void)n_threads;
+    gemm_causal_task_t *t = (gemm_causal_task_t *)arg;
+    int q_hidden = t->n_heads * t->head_dim;
+    int kv_hidden = t->n_kv_heads * t->head_dim;
+    int heads_per_kv = t->n_heads / t->n_kv_heads;
+    float *S = t->scores + (size_t)tid * t->seq_q * t->seq_k;
+
+    for (;;) {
+        int h = __atomic_fetch_add(&t->next_head, 1, __ATOMIC_RELAXED);
+        if (h >= t->n_heads) break;
+        int kv_h = h / heads_per_kv;
+
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    t->seq_q, t->seq_k, t->head_dim, t->scale,
+                    t->Q + h * t->head_dim, q_hidden,
+                    t->K + kv_h * t->head_dim, kv_hidden, 0.0f, S, t->seq_k);
+        for (int i = 0; i < t->seq_q; i++) {
+            int n = t->q_offset + i + 1;
+            if (n > t->seq_k) n = t->seq_k;
+            attn_softmax_row(S + (size_t)i * t->seq_k, n, t->seq_k);
+        }
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    t->seq_q, t->head_dim, t->seq_k, 1.0f,
+                    S, t->seq_k, t->V + kv_h * t->head_dim, kv_hidden, 0.0f,
+                    t->out + h * t->head_dim, q_hidden);
+    }
+}
+
+static int gemm_causal_attention(float *out, const float *Q, const float *K, const float *V,
+                                 int seq_q, int seq_k, int n_heads, int n_kv_heads,
+                                 int head_dim, float scale, int q_offset) {
+    float *scores = attn_scores_get((size_t)seq_q * seq_k);
+    if (!scores) return -1;
+    gemm_causal_task_t task = {
+        .out = out, .Q = Q, .K = K, .V = V,
+        .seq_q = seq_q, .seq_k = seq_k, .n_heads = n_heads, .n_kv_heads = n_kv_heads,
+        .head_dim = head_dim, .q_offset = q_offset, .scale = scale,
+        .next_head = 0, .scores = scores,
+    };
+    if (tp.n_threads > 1) parallel_for(gemm_causal_worker, &task);
+    else gemm_causal_worker(0, 1, &task);
+    return 0;
+}
+#endif /* USE_BLAS && __APPLE__ */
+
 void qwen_bidirectional_attention(float *out, const float *Q, const float *K,
                                    const float *V, int seq __attribute__((unused)),
                                    int n_heads, int head_dim, float scale,
                                    const int *window_starts, int n_windows) {
+#ifdef QWEN_GEMM_ATTENTION
+    if (gemm_bidirectional_attention(out, Q, K, V, n_heads, head_dim, scale,
+                                     window_starts, n_windows) == 0)
+        return;
+#endif
     int hidden = n_heads * head_dim;
 
     for (int h = 0; h < n_heads; h++) {
@@ -1140,6 +1293,12 @@ static void causal_attn_worker(int tid, int n_threads, void *arg) {
 void qwen_causal_attention(float *out, const float *Q, const float *K, const float *V,
                             int seq_q, int seq_k, int n_heads, int n_kv_heads,
                             int head_dim, float scale, int q_offset) {
+#ifdef QWEN_GEMM_ATTENTION
+    if (seq_q >= 8 &&
+        gemm_causal_attention(out, Q, K, V, seq_q, seq_k, n_heads, n_kv_heads,
+                              head_dim, scale, q_offset) == 0)
+        return;
+#endif
     if (tp.n_threads > 1 && n_heads >= 2 && (seq_q >= 2 || seq_k >= 128)) {
         causal_attn_task_t task = {
             .out = out, .Q = Q, .K = K, .V = V,
