@@ -1187,11 +1187,24 @@ static inline void qwen_vec_scale_add(float *dst, const float *src, float correc
     qwen_vec_scale_add_impl(dst, src, correction, n);
 }
 
-/* With Accelerate, attention over many queries is two sgemm calls per head,
- * claimed through an atomic counter so efficiency cores take fewer. OpenBLAS
- * keeps the loops below: a threaded OpenBLAS called from every worker is untested. */
-#if defined(USE_BLAS) && defined(__APPLE__)
+/* With BLAS, attention over many queries is two sgemm calls per head,
+ * claimed through an atomic counter so efficiency cores take fewer. */
+#if defined(USE_BLAS) && (defined(__APPLE__) || defined(USE_OPENBLAS))
 #define QWEN_GEMM_ATTENTION 1
+
+/* Workers call sgemm themselves; keep OpenBLAS to one thread meanwhile. */
+static void attn_parallel_for(parallel_fn_t fn, void *arg) {
+#ifdef USE_OPENBLAS
+    int blas_threads = openblas_get_num_threads();
+    if (tp.n_threads > 1 && blas_threads > 1) {
+        openblas_set_num_threads(1);
+        parallel_for(fn, arg);
+        openblas_set_num_threads(blas_threads);
+        return;
+    }
+#endif
+    parallel_for(fn, arg);
+}
 
 static float *attn_scores = NULL;
 static size_t attn_scores_cap = 0;
@@ -1211,7 +1224,11 @@ static void attn_softmax_row(float *row, int n, int len) {
     float mx = row[0];
     for (int j = 1; j < n; j++) if (row[j] > mx) mx = row[j];
     for (int j = 0; j < n; j++) row[j] -= mx;
+#ifdef __APPLE__
     vvexpf(row, row, &n);
+#else
+    for (int j = 0; j < n; j++) row[j] = expf(row[j]);
+#endif
     float sum = 0.0f;
     for (int j = 0; j < n; j++) sum += row[j];
     float inv = 1.0f / sum;
@@ -1275,7 +1292,7 @@ static int gemm_bidirectional_attention(float *out, const float *Q, const float 
         .window_starts = window_starts, .n_windows = n_windows,
         .max_win = max_win, .next_unit = 0, .scores = scores,
     };
-    if (tp.n_threads > 1) parallel_for(gemm_bidir_worker, &task);
+    if (tp.n_threads > 1) attn_parallel_for(gemm_bidir_worker, &task);
     else gemm_bidir_worker(0, 1, &task);
     return 0;
 }
@@ -1329,11 +1346,11 @@ static int gemm_causal_attention(float *out, const float *Q, const float *K, con
         .head_dim = head_dim, .q_offset = q_offset, .scale = scale,
         .next_head = 0, .scores = scores,
     };
-    if (tp.n_threads > 1) parallel_for(gemm_causal_worker, &task);
+    if (tp.n_threads > 1) attn_parallel_for(gemm_causal_worker, &task);
     else gemm_causal_worker(0, 1, &task);
     return 0;
 }
-#endif /* USE_BLAS && __APPLE__ */
+#endif /* QWEN_GEMM_ATTENTION */
 
 void qwen_bidirectional_attention(float *out, const float *Q, const float *K,
                                    const float *V, int seq __attribute__((unused)),
