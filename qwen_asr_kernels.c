@@ -1478,6 +1478,119 @@ static void causal_attn_worker(int tid, int n_threads, void *arg) {
                                 t->head_dim, t->scale, t->q_offset, h0, h1);
 }
 
+/* Few queries (decode): split the keys into blocks covering all heads, so each
+ * thread reads whole contiguous K/V rows. Block softmax partials are merged after. */
+#define SPLITK_BLOCK 128
+
+typedef struct {
+    const float *Q, *K, *V;
+    int seq_q, seq_k, n_heads, n_kv_heads, head_dim, q_offset;
+    float scale;
+    int n_blocks;
+    int next_block;
+    float *part;    /* [n_blocks][seq_q][n_heads][2 + head_dim]: max, sum, out */
+} splitk_attn_task_t;
+
+static void splitk_attn_worker(int tid, int n_threads, void *arg) {
+    (void)tid; (void)n_threads;
+    splitk_attn_task_t *t = (splitk_attn_task_t *)arg;
+    int H = t->n_heads, D = t->head_dim;
+    int g = H / t->n_kv_heads;
+    int q_hidden = H * D, kv_hidden = t->n_kv_heads * D;
+    float S[H * SPLITK_BLOCK];
+
+    for (;;) {
+        int b = __atomic_fetch_add(&t->next_block, 1, __ATOMIC_RELAXED);
+        if (b >= t->n_blocks) break;
+        int j0 = b * SPLITK_BLOCK;
+        for (int i = 0; i < t->seq_q; i++) {
+            float *P = t->part + ((size_t)b * t->seq_q + i) * H * (2 + D);
+            int j1 = t->q_offset + i + 1;
+            if (j1 > t->seq_k) j1 = t->seq_k;
+            if (j1 > j0 + SPLITK_BLOCK) j1 = j0 + SPLITK_BLOCK;
+            int len = j1 - j0;
+            if (len <= 0) {
+                for (int h = 0; h < H; h++) P[h * (2 + D) + 1] = 0.0f;
+                continue;
+            }
+            const float *q = t->Q + (size_t)i * q_hidden;
+
+            for (int j = 0; j < len; j++) {
+                const float *k_row = t->K + (size_t)(j0 + j) * kv_hidden;
+                for (int h = 0; h < H; h++)
+                    S[h * SPLITK_BLOCK + j] =
+                        qwen_dot_f32(q + h * D, k_row + (h / g) * D, D) * t->scale;
+            }
+            for (int h = 0; h < H; h++) {
+                float *s = S + h * SPLITK_BLOCK;
+                float mx = s[0];
+                for (int j = 1; j < len; j++) if (s[j] > mx) mx = s[j];
+                for (int j = 0; j < len; j++) s[j] = expf(s[j] - mx);
+                float sum = 0.0f;
+                for (int j = 0; j < len; j++) sum += s[j];
+                float *ph = P + h * (2 + D);
+                ph[0] = mx;
+                ph[1] = sum;
+                memset(ph + 2, 0, D * sizeof(float));
+            }
+            for (int j = 0; j < len; j++) {
+                const float *v_row = t->V + (size_t)(j0 + j) * kv_hidden;
+                for (int h = 0; h < H; h++)
+                    qwen_vec_axpy_inplace(P + h * (2 + D) + 2, v_row + (h / g) * D,
+                                          S[h * SPLITK_BLOCK + j], D);
+            }
+        }
+    }
+}
+
+static float *splitk_part = NULL;
+static size_t splitk_part_cap = 0;
+
+static int splitk_causal_attention(float *out, const float *Q, const float *K, const float *V,
+                                   int seq_q, int seq_k, int n_heads, int n_kv_heads,
+                                   int head_dim, float scale, int q_offset) {
+    int n_blocks = (seq_k + SPLITK_BLOCK - 1) / SPLITK_BLOCK;
+    size_t stride = (size_t)n_heads * (2 + head_dim);
+    size_t need = (size_t)n_blocks * seq_q * stride;
+    if (need > splitk_part_cap) {
+        free(splitk_part);
+        splitk_part = (float *)malloc(need * sizeof(float));
+        splitk_part_cap = splitk_part ? need : 0;
+        if (!splitk_part) return -1;
+    }
+    splitk_attn_task_t task = {
+        .Q = Q, .K = K, .V = V,
+        .seq_q = seq_q, .seq_k = seq_k, .n_heads = n_heads, .n_kv_heads = n_kv_heads,
+        .head_dim = head_dim, .q_offset = q_offset, .scale = scale,
+        .n_blocks = n_blocks, .next_block = 0, .part = splitk_part,
+    };
+    if (tp.n_threads > 1 && n_blocks > 1) parallel_for(splitk_attn_worker, &task);
+    else splitk_attn_worker(0, 1, &task);
+
+    int D = head_dim;
+    for (int i = 0; i < seq_q; i++) {
+        for (int h = 0; h < n_heads; h++) {
+            float *o = out + ((size_t)i * n_heads + h) * D;
+            float mx = -1e30f;
+            for (int b = 0; b < n_blocks; b++) {
+                const float *ph = splitk_part + ((size_t)b * seq_q + i) * stride + (size_t)h * (2 + D);
+                if (ph[1] > 0.0f && ph[0] > mx) mx = ph[0];
+            }
+            float sum = 0.0f;
+            memset(o, 0, D * sizeof(float));
+            for (int b = 0; b < n_blocks; b++) {
+                const float *ph = splitk_part + ((size_t)b * seq_q + i) * stride + (size_t)h * (2 + D);
+                if (ph[1] <= 0.0f) continue;
+                float w = expf(ph[0] - mx);
+                sum += w * ph[1];
+                qwen_vec_axpy_inplace(o, ph + 2, w, D);
+            }
+            qwen_vec_scale_inplace(o, 1.0f / sum, D);
+        }
+    }
+    return 0;
+}
+
 void qwen_causal_attention(float *out, const float *Q, const float *K, const float *V,
                             int seq_q, int seq_k, int n_heads, int n_kv_heads,
                             int head_dim, float scale, int q_offset) {
@@ -1487,6 +1600,10 @@ void qwen_causal_attention(float *out, const float *Q, const float *K, const flo
                               head_dim, scale, q_offset) == 0)
         return;
 #endif
+    if (seq_q < 8 && n_heads <= 64 &&
+        splitk_causal_attention(out, Q, K, V, seq_q, seq_k, n_heads, n_kv_heads,
+                                head_dim, scale, q_offset) == 0)
+        return;
     if (tp.n_threads > 1 && n_heads >= 2 && (seq_q >= 2 || seq_k >= 128)) {
         causal_attn_task_t task = {
             .out = out, .Q = Q, .K = K, .V = V,
