@@ -251,6 +251,30 @@ static void bf16_to_f32_buf(float *dst, const uint16_t *src, size_t n) {
 static float *bf16_scratch = NULL;
 static size_t bf16_scratch_cap = 0;
 
+typedef struct {
+    float *dst;
+    const uint16_t *src;
+    size_t n;
+} bf16_convert_task_t;
+
+static void bf16_convert_worker(int tid, int n_threads, void *arg) {
+    bf16_convert_task_t *t = (bf16_convert_task_t *)arg;
+    size_t chunk = ((t->n + n_threads - 1) / n_threads + 15) & ~(size_t)15;
+    size_t start = (size_t)tid * chunk;
+    size_t end = start + chunk < t->n ? start + chunk : t->n;
+    if (start < end) bf16_to_f32_buf(t->dst + start, t->src + start, end - start);
+}
+
+/* Prefill converts each weight on every call. */
+static void bf16_to_f32_parallel(float *dst, const uint16_t *src, size_t n) {
+    if (tp.n_threads > 1 && n >= 65536) {
+        bf16_convert_task_t task = { dst, src, n };
+        parallel_for(bf16_convert_worker, &task);
+    } else {
+        bf16_to_f32_buf(dst, src, n);
+    }
+}
+
 static float *bf16_get_scratch(size_t n) {
     if (n > bf16_scratch_cap) {
         free(bf16_scratch);
@@ -337,7 +361,7 @@ static const float *bf16_get_f32_view(const uint16_t *src, size_t n) {
 
     float *scratch = bf16_get_scratch(n);
     if (!scratch) return NULL;
-    bf16_to_f32_buf(scratch, src, n);
+    bf16_to_f32_parallel(scratch, src, n);
     return scratch;
 }
 
