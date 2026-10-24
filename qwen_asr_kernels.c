@@ -1592,7 +1592,13 @@ static void splitk_attn_worker(int tid, int n_threads, void *arg) {
                 float *s = S + h * SPLITK_BLOCK;
                 float mx = s[0];
                 for (int j = 1; j < len; j++) if (s[j] > mx) mx = s[j];
+#if defined(USE_BLAS) && defined(__APPLE__)
+                /* clang doesn't vectorize expf; gcc does via libmvec. */
+                for (int j = 0; j < len; j++) s[j] -= mx;
+                vvexpf(s, s, &len);
+#else
                 for (int j = 0; j < len; j++) s[j] = expf(s[j] - mx);
+#endif
                 float sum = 0.0f;
                 for (int j = 0; j < len; j++) sum += s[j];
                 float *ph = P + h * (2 + D);
