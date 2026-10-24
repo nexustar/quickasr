@@ -84,6 +84,12 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -i <file>     Input WAV file (16-bit PCM, any sample rate)\n");
     fprintf(stderr, "  --stdin       Read audio from stdin (auto-detect WAV or raw s16le 16kHz mono)\n");
     fprintf(stderr, "\nOptions:\n");
+    fprintf(stderr, "  --device <d>  cpu (default), gpu (the default GPU, through ggml; needs a `make gpu`\n");
+    fprintf(stderr, "                build), or a GPU name from --list-devices, e.g. Vulkan1. The first\n");
+    fprintf(stderr, "                GPU run compiles shaders, which can take ~10 s on macOS\n");
+    fprintf(stderr, "  --list-devices [json]  List the devices for --device and exit; json: one\n");
+    fprintf(stderr, "                array of {name, description, type, threads | free_mib, total_mib,\n");
+    fprintf(stderr, "                default, gpu_default}\n");
     fprintf(stderr, "  -t <n>        Number of threads (default: all CPUs; performance cores on Apple Silicon)\n");
     fprintf(stderr, "  -S <secs>     Segment target seconds (default: 0 = full-audio decode)\n");
     fprintf(stderr, "  -W <secs>     Segment-cutting silence search window ± seconds (default: 3.0)\n");
@@ -140,6 +146,7 @@ int main(int argc, char **argv) {
     const char *force_language = NULL;
     int past_text_conditioning_mode = -1; /* -1 auto, 0 off, 1 on */
     int skip_silence = 0;
+    int list_devices = 0;
     int emit_tokens = 1;
 
     for (int i = 1; i < argc; i++) {
@@ -186,6 +193,14 @@ int main(int argc, char **argv) {
             return 1;
         } else if (strcmp(argv[i], "--skip-silence") == 0) {
             skip_silence = 1;
+        } else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
+            qwen_device = argv[++i];
+        } else if (strcmp(argv[i], "--list-devices") == 0) {
+            list_devices = 1;
+            if (i + 1 < argc && strcmp(argv[i + 1], "json") == 0) {
+                list_devices = 2;
+                i++;
+            }
         } else if (strcmp(argv[i], "--prompt") == 0 && i + 1 < argc) {
             prompt_text = argv[++i];
         } else if (strcmp(argv[i], "--language") == 0 && i + 1 < argc) {
@@ -208,6 +223,11 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (list_devices) {
+        qwen_verbose = verbosity;
+        qwen_set_threads(n_threads > 0 ? n_threads : qwen_get_num_cpus());
+        return qwen_list_devices(list_devices == 2) == 0 ? 0 : 1;
+    }
     if (!model_dir || (!input_wav && !use_stdin)) {
         usage(argv[0]);
         return 1;

@@ -91,6 +91,8 @@ static void *worker_loop(void *arg) {
     }
 }
 
+int qwen_get_threads(void) { return tp.n_threads; }
+
 void qwen_set_threads(int n) {
     if (n < 1) n = 1;
     if (n > QWEN_MAX_THREADS) n = QWEN_MAX_THREADS;

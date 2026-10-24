@@ -197,6 +197,8 @@ typedef struct {
     float *kv_cache_v;
     int kv_cache_len;
     int kv_cache_max;
+    void *ggml_dec;            /* decoder on a ggml GPU (--device), else NULL */
+    int ggml_enc;              /* encoder on that device too (QWEN_GPU_ENC, default on) */
 
     /* Persistent decoder buffers (single-token generation) */
     float *dec_x, *dec_x_norm, *dec_q, *dec_k, *dec_v;
@@ -344,6 +346,16 @@ void qwen_decoder_select_batch_row(int i);
 
 /* Global verbose flag */
 extern int qwen_verbose;
+
+/* --device, set before qwen_load(). NULL or "cpu": this program's CPU path.
+ * "gpu": the encoder and decoder on the default GPU through ggml (a `make gpu`
+ * build), or the CPU when there is none. Otherwise a GPU name from
+ * --list-devices (e.g. "Vulkan1"); qwen_load() fails if none has it. */
+extern const char *qwen_device;
+
+/* --list-devices: print the devices --device accepts to stdout, as text or,
+ * with json, one JSON array. */
+int qwen_list_devices(int json);
 
 /* Monitor mode: show inline Unicode symbols on stderr for streaming diagnostics.
  * Symbols: ▶ encoder  · prefill  ▪ decode  ▸ slow decode  ⟳ window eviction */

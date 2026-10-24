@@ -14,3 +14,9 @@ TODO.md
 .openblas/
 npm/prebuilds/
 npm/LICENSE
+
+# ggml fetched and built by make gpu, and its runtime libraries
+.ggml/
+.vulkan/
+libggml*.so*
+ggml*.dll

@@ -11,7 +11,7 @@ LDFLAGS = -lm -lpthread
 UNAME_S := $(shell uname -s)
 
 # Source files
-SRCS = qwen_asr.c qwen_asr_kernels.c qwen_asr_kernels_generic.c qwen_asr_kernels_neon.c qwen_asr_kernels_avx.c qwen_asr_audio.c qwen_asr_encoder.c qwen_asr_decoder.c qwen_asr_tokenizer.c qwen_asr_safetensors.c
+SRCS = qwen_asr.c qwen_asr_kernels.c qwen_asr_kernels_generic.c qwen_asr_kernels_neon.c qwen_asr_kernels_avx.c qwen_asr_audio.c qwen_asr_encoder.c qwen_asr_decoder.c qwen_asr_tokenizer.c qwen_asr_safetensors.c qwen_asr_ggml.c
 OBJS = $(SRCS:.c=.o)
 MAIN = main.c
 ifeq ($(OS),Windows_NT)
@@ -23,7 +23,7 @@ endif
 # Debug build flags
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 
-.PHONY: all clean debug info help blas test test-stream-cache
+.PHONY: all clean debug info help blas gpu gpu-runtime test test-stream-cache
 
 # Default: show available targets
 all: help
@@ -33,6 +33,7 @@ help:
 	@echo ""
 	@echo "Choose a backend:"
 	@echo "  make blas     - With BLAS acceleration (Accelerate/OpenBLAS)"
+	@echo "  make gpu      - blas plus --device gpu (Metal on macOS, Vulkan elsewhere; fetches ggml)"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make debug    - Debug build with AddressSanitizer"
@@ -61,6 +62,46 @@ OPENBLAS_LIBS ?= -lopenblas
 blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_OPENBLAS $(OPENBLAS_CFLAGS)
 blas: LDFLAGS := $(OPENBLAS_LIBS) $(LDFLAGS)
 endif
+
+# =============================================================================
+# Backend: gpu (blas plus --device gpu: Metal on macOS, Vulkan elsewhere, via ggml)
+# scripts/build-ggml.sh fetches and builds a pinned ggml in .ggml/;
+# GGML_SRC=dir builds a local ggml checkout instead.
+# =============================================================================
+GGML_OUT ?= .ggml
+GGML_INC = $(if $(GGML_SRC),$(GGML_SRC),$(GGML_OUT)/src)/include
+GGML_B = $(GGML_OUT)/build
+ifeq ($(UNAME_S),Darwin)
+gpu: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK -DUSE_GGML -I$(GGML_INC)
+gpu: LDFLAGS += $(GGML_B)/src/libggml.a $(GGML_B)/src/ggml-metal/libggml-metal.a \
+                $(GGML_B)/src/libggml-cpu.a $(GGML_B)/src/libggml-base.a \
+                -framework Accelerate -framework Metal -framework MetalKit -framework Foundation -lc++
+GGML_RUNTIME =
+else
+# Backends are modules loaded at run time, so a missing Vulkan driver leaves the
+# CPU path working; they and libggml are copied next to the binary.
+ifeq ($(OS),Windows_NT)
+# Import libraries by path, so a -static in OPENBLAS_LIBS doesn't hide them
+GGML_LIBS = $(GGML_B)/src/libggml.dll.a $(GGML_B)/src/libggml-base.dll.a
+else
+GGML_LIBS = -L$(GGML_B)/src -L$(GGML_B)/bin -lggml -lggml-base -Wl,-rpath,'$$ORIGIN'
+endif
+gpu: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_OPENBLAS $(OPENBLAS_CFLAGS) -DUSE_GGML -DGGML_BACKEND_DL -I$(GGML_INC)
+gpu: LDFLAGS := $(OPENBLAS_LIBS) $(GGML_LIBS) $(LDFLAGS)
+GGML_RUNTIME = $(wildcard $(GGML_B)/src/libggml*.so $(GGML_B)/bin/libggml*.so $(GGML_B)/bin/ggml*.dll)
+endif
+gpu:
+	@GGML_SRC="$(GGML_SRC)" scripts/build-ggml.sh $(GGML_OUT)
+	@$(MAKE) clean
+	@$(MAKE) $(TARGET) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)"
+	@$(MAKE) --no-print-directory gpu-runtime
+	@echo ""
+	@echo "Built with BLAS + GPU (ggml) backend"
+
+# Evaluated after the ggml build, so the wildcard sees its outputs.
+gpu-runtime:
+	@$(if $(strip $(GGML_RUNTIME)),cp $(GGML_RUNTIME) .,true)
+
 blas:
 	@$(MAKE) clean
 	@$(MAKE) $(TARGET) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)"
@@ -87,7 +128,7 @@ debug:
 # Utilities
 # =============================================================================
 clean:
-	rm -f $(OBJS) main.o qwen_asr qwen_asr.exe
+	rm -f $(OBJS) main.o qwen_asr qwen_asr.exe libggml*.so* ggml*.dll
 
 info:
 	@echo "Platform: $(UNAME_S)"

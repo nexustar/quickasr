@@ -13,6 +13,7 @@
 #include "qwen_asr.h"
 #include "qwen_asr_kernels.h"
 #include "qwen_asr_safetensors.h"
+#include "qwen_asr_ggml.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -261,7 +262,26 @@ static int ensure_rope_cache(qwen_ctx_t *ctx, int required_pos, int head_dim, fl
  * Decoder Prefill (Multiple Tokens)
  * ======================================================================== */
 
+#ifdef USE_GGML
+/* Row of the last ggml logits that qwen_decoder_next_excluding refers to. */
+static int ggml_row = 0;
+
+static int argmax_excl(const float *v, int n, int excl) {
+    int best = -1;
+    float bv = -1e30f;
+    for (int i = 0; i < n; i++)
+        if (i != excl && v[i] > bv) { bv = v[i]; best = i; }
+    return best;
+}
+#endif
+
 void qwen_decoder_prefill(qwen_ctx_t *ctx, const float *input_embeds, int seq_len) {
+#ifdef USE_GGML
+    if (ctx->ggml_dec) {
+        if (qwen_ggml_decode(ctx, input_embeds, seq_len, 0) == 0) ctx->kv_cache_len += seq_len;
+        return;
+    }
+#endif
     qwen_decoder_t *dec = &ctx->decoder;
     const qwen_config_t *cfg = &ctx->config;
     int dim = cfg->dec_hidden;
@@ -391,6 +411,14 @@ static void ensure_dec_buffers(qwen_ctx_t *ctx) {
 static const float *decoder_last_x = NULL;
 
 int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
+#ifdef USE_GGML
+    if (ctx->ggml_dec) {
+        if (qwen_ggml_decode(ctx, input_embed, 1, 1) != 0) return QWEN_TOKEN_IM_END;
+        ctx->kv_cache_len++;
+        ggml_row = 0;
+        return argmax_excl(qwen_ggml_logits(ctx, 0), ctx->config.vocab_size, -1);
+    }
+#endif
     qwen_decoder_t *dec = &ctx->decoder;
     const qwen_config_t *cfg = &ctx->config;
     int dim = cfg->dec_hidden;
@@ -501,6 +529,16 @@ static int ensure_batch_buffers(const qwen_config_t *cfg, int n) {
 }
 
 int qwen_decoder_forward_batch(qwen_ctx_t *ctx, const float *embeds, int n, int *pred) {
+#ifdef USE_GGML
+    if (ctx->ggml_dec) {
+        if (n < 1 || qwen_ggml_decode(ctx, embeds, n, 1) != 0) return -1;
+        ctx->kv_cache_len += n;
+        for (int i = 0; i < n; i++)
+            pred[i] = argmax_excl(qwen_ggml_logits(ctx, i), ctx->config.vocab_size, -1);
+        ggml_row = n - 1;
+        return 0;
+    }
+#endif
     qwen_decoder_t *dec = &ctx->decoder;
     const qwen_config_t *cfg = &ctx->config;
     int dim = cfg->dec_hidden;
@@ -569,11 +607,18 @@ int qwen_decoder_forward_batch(qwen_ctx_t *ctx, const float *embeds, int n, int 
 }
 
 void qwen_decoder_select_batch_row(int i) {
+#ifdef USE_GGML
+    ggml_row = i;
+#endif
     decoder_last_x = bx + (size_t)i * b_dim;
 }
 
 /* The most likely next token other than `excl`, for the step just run. */
 int qwen_decoder_next_excluding(qwen_ctx_t *ctx, int excl) {
+#ifdef USE_GGML
+    if (ctx->ggml_dec)
+        return argmax_excl(qwen_ggml_logits(ctx, ggml_row), ctx->config.vocab_size, excl);
+#endif
     if (!decoder_last_x) return excl;
     return qwen_argmax_matvec_bf16_excl(decoder_last_x, ctx->decoder.tok_embeddings_bf16,
                                         ctx->config.dec_hidden, ctx->config.vocab_size, excl);

@@ -33,6 +33,10 @@ Architecture/background references:
 - Streaming: `--stream`
 - Input from file: `-i file.wav`
 - Input from stdin: `--stdin` (WAV or raw s16le 16k mono)
+- Device: `--device cpu|gpu|<name>` (default `cpu`, this program's CPU path, never ggml's
+  CPU backend); `gpu`/`<name>` need a `make gpu` build (encoder and decoder through ggml;
+  same stream logic). `--list-devices` lists them. `gpu` with no GPU falls back to the CPU
+  path; an unknown name fails `qwen_load`
 
 ## User-Facing Behavior Contract (Do Not Break)
 
@@ -95,6 +99,12 @@ From `qwen_load()` and CLI:
   - x86 AVX hot kernels
 - `qwen_asr_kernels_impl.h`
   - architecture dispatch macros
+- `qwen_asr_ggml.c`
+  - GPU path: encoder and decoder as ggml graphs, device KV cache (only with `USE_GGML`)
+- `scripts/build-ggml.sh`
+  - fetches the pinned ggml release (sha256) into `.ggml/` and builds it for `make gpu`
+- `scripts/build-vulkan-tools.sh`
+  - builds pinned glslc + Vulkan/SPIR-V headers into `.vulkan/` (Linux release builds; `VULKAN_SDK=.vulkan`)
 - `asr_regression.py`
   - quality + focused regression checks
 - `download_model.sh`
@@ -105,6 +115,11 @@ From `qwen_load()` and CLI:
 Build:
 ```bash
 make blas
+```
+
+GPU build (fetches ggml; needs CMake, and off macOS glslc + Vulkan/SPIR-V headers + loader):
+```bash
+make gpu
 ```
 
 Smoke run:
@@ -159,6 +174,7 @@ Current streaming behavior in `qwen_transcribe_stream()`:
 
 Debug/env switch:
 - `QWEN_STREAM_NO_ENC_CACHE=1` disables encoder window cache (debug/regression only)
+- `QWEN_GPU_ENC=0` with a GPU `--device` keeps the encoder on the CPU (debug/A-B only)
 - `QWEN_STREAM_NO_DRAFT=1` disables reusing the previous step's tokens as a one-pass draft (debug/regression only; output is identical either way)
 
 Important caveat:

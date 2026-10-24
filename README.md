@@ -44,6 +44,7 @@ ffmpeg -i audio.mp3 -f s16le -ar 16000 -ac 1 - 2>/dev/null | \
 - **Language control**: `--language Italian` forces the target language (otherwise it is usually auto-detected).
 - **Prompt biasing**: `--prompt` injects a system prompt to bias the model toward specific terms or spellings. Note that prompt biasing is very soft. The models may or may not care about your instructions. Usually spelling instructions are followed decently.
 - **Optional silence skipping**: `--skip-silence` drops long silent spans before inference (off by default). It may use less CPU for the same file.
+- **Optional GPU**: a `make gpu` build runs the encoder and decoder on the GPU with `--device gpu`, through [ggml](https://github.com/ggml-org/ggml) (Metal on macOS; Vulkan on Linux and Windows, untested so far).
 - **Memory-mapped weights**: BF16 weights are mmap'd directly from safetensors files — loading is near-instant.
 - **WAV input**: Supports 16-bit PCM WAV files at any sample rate (auto-resampled to 16kHz).
 - **Stdin input**: Reads from stdin with auto-detection (WAV header or raw s16le 16kHz mono).
@@ -247,6 +248,44 @@ Tradeoffs:
 - Can slightly alter timing-sensitive boundary behavior and punctuation.
 - Disabled by default to preserve baseline behavior.
 
+### GPU (`--device`)
+
+```bash
+make gpu
+./qwen_asr -d qwen3-asr-1.7b --stdin --stream --device gpu
+```
+
+With a `make gpu` build, `--device gpu` runs the encoder and decoder on the GPU through
+ggml; the streaming logic and output are the same as on the CPU. On an Apple M1 Pro
+(14-core GPU), a 180 s Chinese clip with `--stream`:
+
+| Model | CPU | `--device gpu` |
+|---|---|---|
+| 0.6B | 42 s | 18 s |
+| 1.7B | 93 s | 36 s |
+
+CPU use drops to almost nothing, and 1.7B keeps up with `--stream-chunk-sec 1` (slowest
+step 0.7 s). Memory use is about 1 GB higher (the device holds an f16 copy of the weights).
+
+`--device` takes `cpu` (the default), `gpu`, or a GPU name from `--list-devices`:
+```text
+$ ./qwen_asr --list-devices
+cpu: CPU (6 threads) [default]
+MTL0: Apple M1 Pro (gpu, 10922 MiB free of 10922 MiB) [gpu]
+```
+
+Notes:
+- `gpu` is the first discrete GPU, else the first integrated one (marked `[gpu]` in the
+  list); with several, name one (e.g. `--device Vulkan1`). With no GPU, or no Vulkan
+  driver on Linux and Windows, `--device gpu` prints a notice and runs on the CPU; a
+  name that matches no GPU is an error.
+- The first run compiles the GPU shaders, which takes 10-20 s on macOS; the system caches
+  the result, so later runs start in about a second.
+- `cpu` is this program's own CPU path, not ggml's CPU backend, which is 1.5-2.5x slower
+  here (M1 Pro, same output).
+- Without a `make gpu` build, `--device gpu` prints a notice and runs on the CPU.
+- Vulkan (Linux, Windows) has not been benchmarked yet.
+
 ### Language (`--language`)
 
 ```bash
@@ -414,6 +453,7 @@ Per sample, the tool reports two distances:
 
 ```bash
 make blas       # BLAS acceleration (Accelerate on macOS, OpenBLAS on Linux and Windows)
+make gpu        # blas plus GPU support (Metal on macOS, Vulkan elsewhere)
 make test       # Run regression checks (requires built binary + model files)
 make test-stream-cache  # Check stream cache on/off equivalence
 make clean      # Clean build artifacts
@@ -434,6 +474,18 @@ For Windows, build in an [MSYS2](https://www.msys2.org/) UCRT64 shell
 pacman -S make mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-openblas
 make blas       # produces qwen_asr.exe
 ```
+
+`make gpu` needs CMake. It runs `scripts/build-ggml.sh`, which downloads a pinned ggml
+release (checksum-verified) into `.ggml/` and builds it; `GGML_SRC=/path/to/ggml` builds a
+local checkout instead. On macOS ggml is linked statically and its Metal shaders are
+embedded as source. On Linux and Windows it also needs `glslc` and the Vulkan and
+SPIR-V headers and loader: the Vulkan SDK (found through `VULKAN_SDK`), distribution
+packages (e.g. `glslc libvulkan-dev spirv-headers` on Debian/Ubuntu;
+`mingw-w64-ucrt-x86_64-{cmake,vulkan-devel,shaderc,spirv-headers}` in MSYS2), or
+`scripts/build-vulkan-tools.sh`, which builds `glslc` and installs the headers into
+`.vulkan/` (then `VULKAN_SDK=$PWD/.vulkan make gpu`; the loader still comes from the
+system). libggml and the Vulkan and CPU backend modules are copied next to the binary and
+loaded at run time, so a machine without a Vulkan driver still runs on the CPU.
 
 ### Prebuilt binary (npm)
 

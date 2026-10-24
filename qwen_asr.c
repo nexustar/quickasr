@@ -7,12 +7,14 @@
 
 #include "qwen_asr.h"
 #include "qwen_asr_kernels.h"
+#include "qwen_asr_ggml.h"
 #include "qwen_asr_safetensors.h"
 #include "qwen_asr_audio.h"
 #include "qwen_asr_tokenizer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <math.h>
 #include <limits.h>
@@ -21,7 +23,21 @@
 
 /* Global verbose flag */
 int qwen_verbose = 0;
+const char *qwen_device = NULL;
 int qwen_monitor = 0;
+
+int qwen_list_devices(int json) {
+    if (json)
+        printf("[{\"name\":\"cpu\",\"description\":\"CPU\",\"type\":\"cpu\",\"threads\":%d,"
+               "\"default\":true,\"gpu_default\":false}", qwen_get_threads());
+    else
+        printf("cpu: CPU (%d threads) [default]\n", qwen_get_threads());
+#ifdef USE_GGML
+    qwen_ggml_list_devices(json);
+#endif
+    if (json) printf("]\n");
+    return 0;
+}
 
 void qwen_set_token_callback(qwen_ctx_t *ctx, qwen_token_cb cb, void *userdata) {
     ctx->token_cb = cb;
@@ -239,6 +255,30 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
         qwen_free(ctx);
         return NULL;
     }
+    int on_gpu = qwen_device && strcasecmp(qwen_device, "cpu") != 0;
+#ifdef USE_GGML
+    if (on_gpu) {
+        int rc = qwen_ggml_decoder_init(ctx);
+        if (rc == 0) {
+            /* QWEN_GPU_ENC=0 keeps the encoder on the CPU (debug) */
+            const char *enc_env = getenv("QWEN_GPU_ENC");
+            ctx->ggml_enc = !(enc_env && enc_env[0] == '0') && qwen_ggml_encoder_init(ctx) == 0;
+        } else if (rc == -2) {
+            qwen_free(ctx);
+            return NULL;
+        } else {
+            fprintf(stderr, "qwen_load: no usable GPU, running on the CPU\n");
+        }
+    }
+#else
+    if (on_gpu && strcasecmp(qwen_device, "gpu") == 0) {
+        fprintf(stderr, "qwen_load: built without GPU support (make gpu), running on the CPU\n");
+    } else if (on_gpu) {
+        fprintf(stderr, "qwen_load: built without GPU support (make gpu), no device %s\n", qwen_device);
+        qwen_free(ctx);
+        return NULL;
+    }
+#endif
 
     /* Default transcription mode: full-audio offline decode (no splitting). */
     ctx->segment_sec = 0.0f;
@@ -300,6 +340,9 @@ void qwen_free(qwen_ctx_t *ctx) {
 
     #undef FREE0
 
+#ifdef USE_GGML
+    qwen_ggml_decoder_free(ctx);
+#endif
     /* KV cache */
     free(ctx->kv_cache_k);
     free(ctx->kv_cache_v);
