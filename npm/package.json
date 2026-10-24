@@ -18,12 +18,18 @@
     "index.js",
     "index.d.ts",
     "bin",
-    "prebuilds",
     "LICENSE"
   ],
   "os": ["linux", "darwin", "win32"],
   "cpu": ["x64", "arm64"],
   "engines": {
     "node": ">=16"
+  },
+  "optionalDependencies": {
+    "qwen-asr-darwin-arm64": "0.0.0",
+    "qwen-asr-darwin-x64": "0.0.0",
+    "qwen-asr-linux-x64": "0.0.0",
+    "qwen-asr-linux-arm64": "0.0.0",
+    "qwen-asr-win32-x64": "0.0.0"
   }
 }

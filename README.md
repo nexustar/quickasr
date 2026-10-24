@@ -497,11 +497,18 @@ npm install -g qwen-asr
 qwen-asr -d qwen3-asr-0.6b -i samples/jfk.wav
 ```
 
+Each platform's binary is in its own package (`qwen-asr-darwin-arm64`,
+`qwen-asr-linux-x64`, ...), an optional dependency of `qwen-asr`, so npm
+downloads only the one for the machine. All but the Intel Mac binary are
+`make gpu` builds and support `--device gpu` (Metal on Apple Silicon, Vulkan on
+Linux and Windows).
+
 Release binaries are built by `scripts/build-linux.sh` (inside
-`manylinux_2_28`; x86-64-v3 or ARMv8.2, OpenBLAS linked statically) and
-`scripts/build-darwin.sh` (Apple M1 or x86-64-v3, Accelerate) and
+`manylinux_2_28`; x86-64-v3 or ARMv8.2, OpenBLAS linked statically, `make gpu`
+with Vulkan) and
+`scripts/build-darwin.sh` (Apple M1 with `make gpu`, or x86-64-v3; Accelerate) and
 `scripts/build-windows.sh` (MSYS2 UCRT64; x86-64-v3, OpenBLAS and MinGW
-runtime linked statically). The Makefile
+runtime linked statically, `make gpu` with Vulkan). The Makefile
 accepts the same overrides for custom builds:
 ```bash
 make blas ARCH_FLAGS=-march=x86-64-v3 OPENBLAS_CFLAGS=-I/opt/openblas/include \
@@ -509,7 +516,8 @@ make blas ARCH_FLAGS=-march=x86-64-v3 OPENBLAS_CFLAGS=-I/opt/openblas/include \
 ```
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds all
-platforms, runs a transcription smoke test on each, and publishes to npm.
+platforms into `npm/platforms/<platform>/`, runs a transcription smoke test on
+each, and publishes the platform packages and then `qwen-asr` to npm.
 
 ## How Fast Is It?
 

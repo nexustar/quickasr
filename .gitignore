@@ -12,7 +12,8 @@ Qwen3-ASR
 TODO.md
 .stream_bench_refs/
 .openblas/
-npm/prebuilds/
+npm/platforms/*/*
+!npm/platforms/*/package.json
 npm/LICENSE
 
 # ggml fetched and built by make gpu, and its runtime libraries

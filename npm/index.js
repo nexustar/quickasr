@@ -32,15 +32,35 @@ function unsupported(code, message) {
   return err;
 }
 
+// The binary comes in the qwen-asr-<key> package npm installs for this
+// platform (an optional dependency); in a repository checkout, from
+// npm/platforms/<key>.
+function binaryIn(key, exe) {
+  let dir = null;
+  try {
+    dir = path.dirname(require.resolve(`qwen-asr-${key}/package.json`));
+  } catch (e) {
+    dir = path.join(__dirname, 'platforms', key);
+  }
+  const bin = path.join(dir, exe);
+  return fs.existsSync(bin) ? bin : null;
+}
+
 // Absolute path of the binary. Throws an Error with code
 // QWEN_ASR_UNSUPPORTED_PLATFORM or QWEN_ASR_UNSUPPORTED_CPU when none can
 // run here.
 function binaryPath() {
-  const key = platformKey();
+  let key = platformKey();
   const exe = process.platform === 'win32' ? 'qwen_asr.exe' : 'qwen_asr';
-  const bin = path.join(__dirname, 'prebuilds', key, exe);
-  if (!fs.existsSync(bin)) {
-    throw unsupported('QWEN_ASR_UNSUPPORTED_PLATFORM', `no prebuilt binary for ${key}`);
+  let bin = binaryIn(key, exe);
+  // x64 Node under Rosetta gets only the x64 package from npm
+  if (!bin && key === 'darwin-arm64' && process.arch === 'x64') {
+    key = 'darwin-x64';
+    bin = binaryIn(key, exe);
+  }
+  if (!bin) {
+    throw unsupported('QWEN_ASR_UNSUPPORTED_PLATFORM',
+      `no prebuilt binary for ${key} (the optional dependency qwen-asr-${key} is not installed)`);
   }
   const required = REQUIRED[key];
   if (required) {

@@ -1,0 +1,14 @@
+{
+  "name": "qwen-asr-win32-x64",
+  "version": "0.0.0",
+  "description": "qwen_asr binary for Windows x86-64, installed by the qwen-asr package",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nexustar/qwen-asr.git"
+  },
+  "homepage": "https://github.com/nexustar/qwen-asr",
+  "files": ["qwen_asr*", "LICENSE*", "libggml*", "ggml*.dll"],
+  "os": ["win32"],
+  "cpu": ["x64"]
+}

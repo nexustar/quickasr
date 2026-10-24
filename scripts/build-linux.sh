@@ -1,10 +1,12 @@
 #!/bin/bash
 # Build the Linux release binary for the host arch (x86_64: x86-64-v3 with
-# HASWELL kernels, aarch64: NEOVERSEN1 kernels, ARMv8.2+). OpenBLAS is linked
-# statically; run in manylinux_2_28 for glibc >= 2.28:
+# HASWELL kernels, aarch64: NEOVERSEN1 kernels, ARMv8.2+) with GPU support
+# through ggml's Vulkan backend. OpenBLAS is linked statically; libggml and
+# the Vulkan and CPU backend modules go next to the binary. Run in
+# manylinux_2_28 for glibc >= 2.28, with the Vulkan loader for linking:
 #
 #   podman run --rm -v "$PWD":/src -w /src quay.io/pypa/manylinux_2_28_x86_64 \
-#       scripts/build-linux.sh
+#       sh -c 'dnf install -y vulkan-loader-devel && scripts/build-linux.sh'
 
 set -euo pipefail
 
@@ -47,15 +49,21 @@ if [ ! -f "$OPENBLAS_PREFIX/lib/libopenblas.a" ]; then
     rm -rf "$work"
 fi
 
-make blas ARCH_FLAGS="$arch_flags" \
+scripts/build-vulkan-tools.sh .vulkan
+export VULKAN_SDK=$PWD/.vulkan
+
+make gpu ARCH_FLAGS="$arch_flags" \
     OPENBLAS_CFLAGS="-I$OPENBLAS_PREFIX/include" \
     OPENBLAS_LIBS="$OPENBLAS_PREFIX/lib/libopenblas.a"
-strip qwen_asr
+strip qwen_asr libggml*.so
 
-mkdir -p "npm/prebuilds/$key"
-cp qwen_asr "npm/prebuilds/$key/qwen_asr"
-cp "$OPENBLAS_PREFIX/LICENSE" "npm/prebuilds/$key/LICENSE-OpenBLAS"
+dir="npm/platforms/$key"
+cp qwen_asr libggml*.so "$dir/"
+cp LICENSE "$dir/LICENSE"
+cp "$OPENBLAS_PREFIX/LICENSE" "$dir/LICENSE-OpenBLAS"
+cp .ggml/src/LICENSE "$dir/LICENSE-ggml"
 cp LICENSE npm/LICENSE
 
-echo "glibc requirement: $(objdump -T qwen_asr | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
-ls -l "npm/prebuilds/$key/qwen_asr"
+echo "glibc requirement: $(objdump -T qwen_asr libggml*.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+for f in qwen_asr libggml*.so; do echo "$f needs: $(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')"; done
+ls -l "$dir"

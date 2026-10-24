@@ -1,7 +1,9 @@
 #!/bin/bash
-# Build the Windows release binary (x86-64-v3 with HASWELL kernels). Run in
-# an MSYS2 UCRT64 shell with mingw-w64-ucrt-x86_64-gcc, make, curl and perl.
-# OpenBLAS and the MinGW runtime are linked statically.
+# Build the Windows release binary (x86-64-v3 with HASWELL kernels) with GPU support
+# through ggml's Vulkan backend. Run in an MSYS2 UCRT64 shell with make, curl,
+# perl and mingw-w64-ucrt-x86_64-{gcc,cmake,vulkan-devel,shaderc,spirv-headers}.
+# OpenBLAS and the MinGW runtime are linked statically; the ggml DLLs go next
+# to the binary.
 
 set -euo pipefail
 
@@ -39,15 +41,17 @@ if [ ! -f "$OPENBLAS_PREFIX/lib/libopenblas.a" ]; then
     rm -rf "$work"
 fi
 
-make blas ARCH_FLAGS="$arch_flags" \
+make gpu ARCH_FLAGS="$arch_flags" \
     OPENBLAS_CFLAGS="-I$OPENBLAS_PREFIX/include" \
     OPENBLAS_LIBS="$OPENBLAS_PREFIX/lib/libopenblas.a -static"
-strip qwen_asr.exe
+strip qwen_asr.exe ggml*.dll
 
-mkdir -p "npm/prebuilds/$key"
-cp qwen_asr.exe "npm/prebuilds/$key/qwen_asr.exe"
-cp "$OPENBLAS_PREFIX/LICENSE" "npm/prebuilds/$key/LICENSE-OpenBLAS"
+dir="npm/platforms/$key"
+cp qwen_asr.exe ggml*.dll "$dir/"
+cp LICENSE "$dir/LICENSE"
+cp "$OPENBLAS_PREFIX/LICENSE" "$dir/LICENSE-OpenBLAS"
+cp .ggml/src/LICENSE "$dir/LICENSE-ggml"
 cp LICENSE npm/LICENSE
 
-echo "DLL imports: $(objdump -p qwen_asr.exe | awk '/DLL Name/{print $3}' | tr '\n' ' ')"
-ls -l "npm/prebuilds/$key/qwen_asr.exe"
+for f in qwen_asr.exe ggml*.dll; do echo "$f imports: $(objdump -p "$f" | awk '/DLL Name/{print $3}' | tr '\n' ' ')"; done
+ls -l "$dir"
