@@ -108,6 +108,10 @@ void qwen_set_threads(int n) {
     }
 
     tp.n_threads = n;
+#ifdef USE_OPENBLAS
+    /* Threading is ours (see pool_sgemm). */
+    openblas_set_num_threads(1);
+#endif
     if (n <= 1) return;
 
     for (int i = 0; i < n - 1; i++) {
@@ -164,6 +168,65 @@ static void parallel_for(parallel_fn_t fn, void *arg) {
     pthread_mutex_unlock(&tp.mutex);
 }
 
+/* OpenBLAS runs single-threaded; large sgemm calls are split into tiles of C
+ * that the pool claims dynamically. C = A * op(B), op(B) = B^T if trans_b. */
+#ifdef USE_OPENBLAS
+typedef struct {
+    float *C;
+    const float *A, *B;
+    int M, N, K, lda, ldb, ldc, trans_b;
+    int mb, nb, tiles_n, n_tiles;
+    int next_tile;
+} pool_sgemm_task_t;
+
+static void pool_sgemm_worker(int tid, int n_threads, void *arg) {
+    (void)tid; (void)n_threads;
+    pool_sgemm_task_t *t = (pool_sgemm_task_t *)arg;
+    for (;;) {
+        int u = __atomic_fetch_add(&t->next_tile, 1, __ATOMIC_RELAXED);
+        if (u >= t->n_tiles) break;
+        int m0 = (u / t->tiles_n) * t->mb, n0 = (u % t->tiles_n) * t->nb;
+        int m = t->M - m0 < t->mb ? t->M - m0 : t->mb;
+        int n = t->N - n0 < t->nb ? t->N - n0 : t->nb;
+        const float *B = t->trans_b ? t->B + (size_t)n0 * t->ldb : t->B + n0;
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, t->trans_b ? CblasTrans : CblasNoTrans,
+                    m, n, t->K, 1.0f, t->A + (size_t)m0 * t->lda, t->lda,
+                    B, t->ldb, 0.0f, t->C + (size_t)m0 * t->ldc + n0, t->ldc);
+    }
+}
+
+static int sgemm_tiles(int M, int N, int mb, int nb) {
+    return ((M + mb - 1) / mb) * ((N + nb - 1) / nb);
+}
+
+static void pool_sgemm(int trans_b, int M, int N, int K, const float *A, int lda,
+                       const float *B, int ldb, float *C, int ldc) {
+    int nt = tp.n_threads;
+    if (nt <= 1 || (double)M * N * K < 4e6) {
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, trans_b ? CblasTrans : CblasNoTrans,
+                    M, N, K, 1.0f, A, lda, B, ldb, 0.0f, C, ldc);
+        return;
+    }
+    /* 256x256 tiles, smaller until there are about 3 per thread. */
+    int mb = 256, nb = 256;
+    while (sgemm_tiles(M, N, mb, nb) < 3 * nt && nb > 64) nb /= 2;
+    while (sgemm_tiles(M, N, mb, nb) < 3 * nt && mb > 32) mb /= 2;
+    pool_sgemm_task_t task = {
+        .C = C, .A = A, .B = B, .M = M, .N = N, .K = K,
+        .lda = lda, .ldb = ldb, .ldc = ldc, .trans_b = trans_b,
+        .mb = mb, .nb = nb, .tiles_n = (N + nb - 1) / nb,
+        .n_tiles = sgemm_tiles(M, N, mb, nb), .next_tile = 0,
+    };
+    parallel_for(pool_sgemm_worker, &task);
+}
+#define BIG_SGEMM(trans_b, M, N, K, A, lda, B, ldb, C, ldc) \
+    pool_sgemm(trans_b, M, N, K, A, lda, B, ldb, C, ldc)
+#elif defined(USE_BLAS)
+#define BIG_SGEMM(trans_b, M, N, K, A, lda, B, ldb, C, ldc) \
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, (trans_b) ? CblasTrans : CblasNoTrans, \
+                M, N, K, 1.0f, A, lda, B, ldb, 0.0f, C, ldc)
+#endif
+
 /* ========================================================================
  * Basic Element-wise Operations
  * ======================================================================== */
@@ -190,8 +253,7 @@ void qwen_copy(float *dst, const float *src, int n) {
 
 void qwen_matmul_t(float *C, const float *A, const float *B, int M, int K, int N) {
 #ifdef USE_BLAS
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                M, N, K, 1.0f, A, K, B, K, 0.0f, C, N);
+    BIG_SGEMM(1, M, N, K, A, K, B, K, C, N);
 #else
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
@@ -208,10 +270,7 @@ void qwen_matmul_t(float *C, const float *A, const float *B, int M, int K, int N
 void qwen_linear(float *y, const float *x, const float *W, const float *b,
                  int seq_len, int in_dim, int out_dim) {
 #ifdef USE_BLAS
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                seq_len, out_dim, in_dim,
-                1.0f, x, in_dim, W, in_dim,
-                0.0f, y, out_dim);
+    BIG_SGEMM(1, seq_len, out_dim, in_dim, x, in_dim, W, in_dim, y, out_dim);
     if (b != NULL) {
         for (int s = 0; s < seq_len; s++) {
             for (int o = 0; o < out_dim; o++) {
@@ -783,10 +842,8 @@ void qwen_conv2d(float *out, const float *in, const float *weight, const float *
 
     /* GEMM: weight[c_out, patch_size] @ cols[patch_size, spatial_out] = out[c_out, spatial_out] */
 #ifdef USE_BLAS
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                c_out, spatial_out, patch_size,
-                1.0f, weight, patch_size, cols, spatial_out,
-                0.0f, out, spatial_out);
+    BIG_SGEMM(0, c_out, spatial_out, patch_size, weight, patch_size, cols, spatial_out,
+              out, spatial_out);
 #else
     for (int oc = 0; oc < c_out; oc++) {
         for (int s = 0; s < spatial_out; s++) {
@@ -1216,20 +1273,6 @@ static inline void qwen_vec_scale_add(float *dst, const float *src, float correc
 #if defined(USE_BLAS) && (defined(__APPLE__) || defined(USE_OPENBLAS))
 #define QWEN_GEMM_ATTENTION 1
 
-/* Workers call sgemm themselves; keep OpenBLAS to one thread meanwhile. */
-static void attn_parallel_for(parallel_fn_t fn, void *arg) {
-#ifdef USE_OPENBLAS
-    int blas_threads = openblas_get_num_threads();
-    if (tp.n_threads > 1 && blas_threads > 1) {
-        openblas_set_num_threads(1);
-        parallel_for(fn, arg);
-        openblas_set_num_threads(blas_threads);
-        return;
-    }
-#endif
-    parallel_for(fn, arg);
-}
-
 static float *attn_scores = NULL;
 static size_t attn_scores_cap = 0;
 
@@ -1316,7 +1359,7 @@ static int gemm_bidirectional_attention(float *out, const float *Q, const float 
         .window_starts = window_starts, .n_windows = n_windows,
         .max_win = max_win, .next_unit = 0, .scores = scores,
     };
-    if (tp.n_threads > 1) attn_parallel_for(gemm_bidir_worker, &task);
+    if (tp.n_threads > 1) parallel_for(gemm_bidir_worker, &task);
     else gemm_bidir_worker(0, 1, &task);
     return 0;
 }
@@ -1370,7 +1413,7 @@ static int gemm_causal_attention(float *out, const float *Q, const float *K, con
         .head_dim = head_dim, .q_offset = q_offset, .scale = scale,
         .next_head = 0, .scores = scores,
     };
-    if (tp.n_threads > 1) attn_parallel_for(gemm_causal_worker, &task);
+    if (tp.n_threads > 1) parallel_for(gemm_causal_worker, &task);
     else gemm_causal_worker(0, 1, &task);
     return 0;
 }
