@@ -1447,6 +1447,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int enc_window_samples = enc_window_frames * QWEN_HOP_LENGTH;
     const char *no_draft_env = getenv("QWEN_STREAM_NO_DRAFT");
     int use_draft = !(no_draft_env && no_draft_env[0] != '\0' && strcmp(no_draft_env, "0") != 0);
+    const char *no_agree_env = getenv("QWEN_STREAM_NO_AGREE");
+    int use_agree = !(no_agree_env && no_agree_env[0] != '\0' && strcmp(no_agree_env, "0") != 0);
     const char *no_cache_env = getenv("QWEN_STREAM_NO_ENC_CACHE");
     int use_enc_cache = 1;
     if (no_cache_env && no_cache_env[0] != '\0' && strcmp(no_cache_env, "0") != 0) {
@@ -1600,6 +1602,11 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      * stay in the decoder prefix from then on: text already written out
      * cannot be revised, so the decoder must not be free to re-decode it. */
     int min_prefix_raw = 0;
+    /* Raw tokens [0, agreed_raw) came out the same in two consecutive steps.
+     * Only those are committed or fed back as prefix: a step that has heard
+     * the first word of a sentence can guess the rest, and fed back, the
+     * guess would confirm itself. */
+    int agreed_raw = 0;
     int held_text_tokens = 0;        /* decoded on the last chunk, not yet emitted */
     int64_t idle_seen_samples = -1;  /* live sample count when last seen to grow */
     double idle_since_ms = 0;
@@ -1683,6 +1690,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         n_raw_tokens = (keep_); \
         n_stable_text_tokens = 0; \
         min_prefix_raw = (keep_); \
+        agreed_raw = (keep_); \
         held_text_tokens = 0; \
         prev_prefill_len = 0; \
         period_held = 0; \
@@ -2223,6 +2231,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int warmed_up = (chunk_idx >= unfixed_chunks || min_prefix_raw > 0);
         if (ctx->past_text_conditioning && warmed_up && n_raw_tokens > 0) {
             n_prefix_tokens_full = n_raw_tokens - rollback;
+            if (use_agree && n_prefix_tokens_full > agreed_raw) n_prefix_tokens_full = agreed_raw;
             if (n_prefix_tokens_full < min_prefix_raw) n_prefix_tokens_full = min_prefix_raw;
             if (n_prefix_tokens_full > n_raw_tokens) n_prefix_tokens_full = n_raw_tokens;
             if (n_prefix_tokens_full < 0) n_prefix_tokens_full = 0;
@@ -2500,6 +2509,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             n_chunk_tokens = out;
         }
 
+        int n_agree = 0;
+        while (n_agree < n_chunk_tokens && n_prefix_tokens_full + n_agree < n_raw_tokens &&
+               raw_tokens[n_prefix_tokens_full + n_agree] == chunk_tokens[n_agree])
+            n_agree++;
         int n_raw_new = n_prefix_tokens_full + n_chunk_tokens;
         /* A stall is a pinned text prefix keeping the decoder silent while
          * someone speaks. Chunks without speech neither count nor break it;
@@ -2528,6 +2541,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                    (size_t)n_chunk_tokens * sizeof(int));
         }
         n_raw_tokens = n_raw_new;
+        agreed_raw = n_prefix_tokens_full + n_agree;
         free(chunk_tokens);
         if (dropped_repeat_tokens > 0 && qwen_verbose >= 2) {
             fprintf(stderr, "  Decode: dropped %d repeated tokens\n", dropped_repeat_tokens);
@@ -2594,6 +2608,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         } else if (warmed_up) {
             candidate_len = n_text_tokens - rollback;
             if (candidate_len <= 0 && n_text_tokens > 0) candidate_len = n_text_tokens - 1;
+            if (use_agree && candidate_len > agreed_raw - text_start)
+                candidate_len = agreed_raw - text_start;
             if (candidate_len < 0) candidate_len = 0;
             period_held = 0;
         }
@@ -2916,6 +2932,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     /* Carried tokens are already shown; left open they get
                      * rewritten and both versions show. */
                     min_prefix_raw = n_raw_tokens;
+                    agreed_raw = n_raw_tokens;
                     held_text_tokens = 0;
                     prev_prefill_len = 0;
                     STREAM_RESET_AUDIO(QWEN_STREAM_RESET_KEEP_ENC_WINDOWS, 0);
