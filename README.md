@@ -80,7 +80,7 @@ Common options:
 | `-S <secs>` | Segmented offline mode for long files |
 | `--language <name>` | Force the language (otherwise auto-detected), e.g. `Chinese`, `English` |
 | `--prompt <text>` | System prompt to bias spelling, e.g. `"Preserve spelling: PostgreSQL"` |
-| `--skip-silence` | Drop long silent spans |
+| `--skip-silence` | Skip silent audio; on by default with `--stdin --stream` (`--no-skip-silence` turns it off) |
 | `--silent` / `--debug` | Only the text on stdout / verbose diagnostics on stderr |
 
 `./quickasr -h` lists every option.

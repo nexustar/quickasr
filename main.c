@@ -112,7 +112,9 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --enc-window-sec <secs>    Encoder attention window in seconds (1..8, default 8)\n");
     fprintf(stderr, "  --past-text <yes|no|auto>  Reuse previously decoded text as context for the next\n");
     fprintf(stderr, "                             segment/chunk (continuity bias; auto=yes for --stream)\n");
-    fprintf(stderr, "  --skip-silence              Drop silent spans (offline) / skip silent chunks (stream); off by default\n");
+    fprintf(stderr, "  --skip-silence             Drop silent spans (offline) / skip silent chunks (stream);\n");
+    fprintf(stderr, "                             on by default with --stdin --stream, off otherwise\n");
+    fprintf(stderr, "  --no-skip-silence          Turn it off for --stdin --stream\n");
     fprintf(stderr, "  --prompt <text>            System prompt for biasing (example: \"Preserve spelling: CPU, CUDA, PostgreSQL, Redis\")\n");
     fprintf(stderr, "  --language <lang>          Force output language via token conditioning\n");
     fprintf(stderr, "                             (usually auto-detected if omitted)\n");
@@ -145,7 +147,7 @@ int main(int argc, char **argv) {
     const char *prompt_text = NULL;
     const char *force_language = NULL;
     int past_text_conditioning_mode = -1; /* -1 auto, 0 off, 1 on */
-    int skip_silence = 0;
+    int skip_silence = -1;          /* -1: on for --stdin --stream */
     int list_devices = 0;
     int emit_tokens = 1;
 
@@ -193,6 +195,8 @@ int main(int argc, char **argv) {
             return 1;
         } else if (strcmp(argv[i], "--skip-silence") == 0) {
             skip_silence = 1;
+        } else if (strcmp(argv[i], "--no-skip-silence") == 0) {
+            skip_silence = 0;
         } else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             qwen_device = argv[++i];
         } else if (strcmp(argv[i], "--list-devices") == 0) {
@@ -286,6 +290,9 @@ int main(int argc, char **argv) {
         /* Official streaming path uses prefix rollback by default.
          * Keep segmented mode default unchanged (off). */
         ctx->past_text_conditioning = 1;
+    /* Live, decoding silence wastes compute and a long pause can lose the
+     * next sentence to a reset; the skip only skips chunks with no speech. */
+    if (skip_silence < 0) skip_silence = stream_mode && use_stdin;
     if (skip_silence) ctx->skip_silence = 1;
     if (prompt_text && qwen_set_prompt(ctx, prompt_text) != 0) {
         fprintf(stderr, "Failed to set --prompt text\n");

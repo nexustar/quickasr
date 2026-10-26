@@ -72,6 +72,7 @@ From `qwen_load()` and CLI:
 - Stream rollback: `5` tokens
 - Stream unfixed chunks: `2`
 - Stream max new tokens/chunk: `32`
+- `--skip-silence`: on for `--stdin --stream` (`--no-skip-silence` turns it off), off otherwise
 - Encoder infer attention window: `8s` (`--enc-window-sec` in `[1,8]`)
 
 ## Repository Map

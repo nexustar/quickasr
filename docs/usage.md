@@ -76,10 +76,11 @@ If repeated conditioned segment collapses are detected, conditioning is disabled
 
 When enabled, long silent spans are removed before transcription (short pauses are kept). This reduces compute on recordings with long dead-air sections.
 
+With live input (`--stdin --stream`) it is on by default (`--no-skip-silence` turns it off): a chunk is skipped only when none of its 30 ms frames rises above the noise floor, and the pause detection behind the flush and the pause reset uses the same frames. Decoding long silence wastes compute and can lose the sentence after the pause to a reset. Elsewhere it is off by default.
+
 Tradeoffs:
 - Useful for podcasts, meetings, and captured audio with long pauses.
 - Can slightly alter timing-sensitive boundary behavior and punctuation.
-- Disabled by default to preserve baseline behavior.
 
 ## GPU (`--device`)
 
