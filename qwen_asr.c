@@ -1494,13 +1494,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     /* MIN_SCORE 6 is three net matching tokens. */
     #define QWEN_STREAM_STITCH_TAIL 48
     #define QWEN_STREAM_STITCH_MIN_SCORE 6
-    /* Stream-mode silence skip: chunks whose RMS sits below an adaptive
-     * threshold (P25 of recent chunk RMS × ratio) are skipped past the
-     * encoder/decoder/emit work. Mirrors compact_silence's offline gating. */
+    /* Stream-mode silence skip: chunks the pause test below finds no speech
+     * in skip the encoder/decoder/emit work; until it has enough history,
+     * chunks under an absolute RMS. */
     #define QWEN_STREAM_SILENCE_BASE_RMS 0.002f
-    #define QWEN_STREAM_SILENCE_MAX_RMS 0.025f
-    #define QWEN_STREAM_SILENCE_RATIO 1.8f
-    #define QWEN_STREAM_RMS_HIST_LEN 16
     #define QWEN_STREAM_MAX_SILENCE_SKIPS 60
     /* Pause test for the flush and the pause reset. The chunk test above
      * calls the quieter part of continuous speech silent; this one compares
@@ -1719,9 +1716,6 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int prev_prefill_cap = 0;
     int prefill_total_tokens = 0;
     int prefill_reused_tokens = 0;
-    float rms_hist[QWEN_STREAM_RMS_HIST_LEN];
-    int rms_hist_pos = 0;
-    int rms_hist_count = 0;
     int consecutive_silence_skips = 0;
     float *ep_hist = (float *)malloc(QWEN_STREAM_EP_HIST * sizeof(float));
     float *ep_sorted = (float *)malloc(QWEN_STREAM_EP_HIST * sizeof(float));
@@ -1964,45 +1958,26 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 chunk_no_speech = (sp_thr > 0 && !had_speech);
 
                 /* Stream-mode silence skip: when --skip-silence is on, drop
-                 * the encoder/decoder/emit work for chunks whose RMS sits
-                 * below an adaptive threshold computed from recent chunk RMS
-                 * values (P25 × ratio, mirrors compact_silence). Samples
-                 * remain in the local buffer so future complete encoder
-                 * windows still see them intact -- only the per-chunk emit
-                 * cycle is short-circuited. Capped at
+                 * the encoder/decoder/emit work for chunks without speech.
+                 * Samples remain in the local buffer so future complete
+                 * encoder windows still see them intact -- only the per-chunk
+                 * emit cycle is short-circuited. Capped at
                  * QWEN_STREAM_MAX_SILENCE_SKIPS in a row so any pending
                  * decoder/text state still gets flushed during very long
                  * pauses. The flush and the pause reset hang off the same
-                 * live, skip-silence path. */
+                 * live, skip-silence path. A chunk RMS against recent chunks
+                 * would call steady speech silent, so the pause test decides. */
                 if (ctx->skip_silence && live) {
-                    float energy = 0.0f;
-                    for (int64_t i = 0; i < chunk_len; i++) {
-                        float v = audio_samples[chunk_local_off + i];
-                        energy += v * v;
-                    }
-                    float chunk_rms = sqrtf(energy / (float)chunk_len);
-
-                    rms_hist[rms_hist_pos] = chunk_rms;
-                    rms_hist_pos = (rms_hist_pos + 1) % QWEN_STREAM_RMS_HIST_LEN;
-                    if (rms_hist_count < QWEN_STREAM_RMS_HIST_LEN) rms_hist_count++;
-
-                    float threshold;
-                    if (rms_hist_count < 4) {
-                        threshold = QWEN_STREAM_SILENCE_BASE_RMS;
+                    int silent_chunk;
+                    if (sp_thr > 0) {
+                        silent_chunk = !had_speech;
                     } else {
-                        float sorted[QWEN_STREAM_RMS_HIST_LEN];
-                        memcpy(sorted, rms_hist,
-                               (size_t)rms_hist_count * sizeof(float));
-                        qsort(sorted, (size_t)rms_hist_count, sizeof(float),
-                              cmp_float_asc);
-                        float p25 = sorted[rms_hist_count / 4];
-                        threshold = p25 * QWEN_STREAM_SILENCE_RATIO;
-                        if (threshold < QWEN_STREAM_SILENCE_BASE_RMS) {
-                            threshold = QWEN_STREAM_SILENCE_BASE_RMS;
+                        float energy = 0.0f;
+                        for (int64_t i = 0; i < chunk_len; i++) {
+                            float v = audio_samples[chunk_local_off + i];
+                            energy += v * v;
                         }
-                        if (threshold > QWEN_STREAM_SILENCE_MAX_RMS) {
-                            threshold = QWEN_STREAM_SILENCE_MAX_RMS;
-                        }
+                        silent_chunk = sqrtf(energy / (float)chunk_len) < QWEN_STREAM_SILENCE_BASE_RMS;
                     }
 
                     /* A pause that fell between two chunk boundaries is seen
@@ -2023,15 +1998,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                         /* The speaker has paused: decode now so the held tail
                          * comes out, not when speech resumes. */
                         is_flush = 1;
-                    } else if (chunk_rms < threshold &&
+                    } else if (silent_chunk &&
                         consecutive_silence_skips < QWEN_STREAM_MAX_SILENCE_SKIPS) {
                         consecutive_silence_skips++;
                         if (qwen_verbose >= 2) {
-                            fprintf(stderr,
-                                    "  Silence skip: rms=%.5f thresh=%.5f "
-                                    "(chunk %d, run=%d)\n",
-                                    chunk_rms, threshold, chunk_idx,
-                                    consecutive_silence_skips);
+                            fprintf(stderr, "  Silence skip: chunk %d, run=%d\n",
+                                    chunk_idx, consecutive_silence_skips);
                         }
                         if (!pause_reset_done && pause_reset_sec > 0 && held_text_tokens == 0 &&
                             silent_run_sec >= pause_reset_sec &&
