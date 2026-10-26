@@ -25,3 +25,9 @@ npm/LICENSE
 .vulkan/
 libggml*.so*
 ggml*.dll
+
+# bench/ data and results
+bench/.venv/
+bench/data/
+bench/streams/
+bench/out/

@@ -2,12 +2,15 @@
 
 Measured on an **Apple M1 Pro** (6 performance + 2 efficiency cores, 14-core GPU, 16 GB)
 with a `make gpu` build and the default threads (the 6 performance cores). Times are the
-`Inference` line of the summary (model loading excluded), median of 3 runs.
+`Inference` line of the summary (model loading excluded), median of 3 runs. The offline
+and whole-file streaming tables use the clips in `samples/`.
 
 ## Real-time Streaming Latency
 
 The main use case: audio fed to `--stdin --stream --stream-json` at 1x, 180 s each of
-Chinese (AISHELL) and English (LibriSpeech) speech. Latency is the time from the end of a
+Chinese (AISHELL-1 test) and English (LibriSpeech test-clean) speech, built and scored
+with the scripts in [bench/](../bench/README.md) (the audio is downloaded, not in the
+repository). Latency is the time from the end of a
 word in the audio to its appearance: *shown* counts the provisional `tail`, *committed*
 only final text. Seconds, p50 / p90:
 

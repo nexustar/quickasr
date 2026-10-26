@@ -110,6 +110,8 @@ From `qwen_load()` and CLI:
   - builds pinned glslc + Vulkan/SPIR-V headers into `.vulkan/` (Linux release builds; `VULKAN_SDK=.vulkan`)
 - `asr_regression.py`
   - quality + focused regression checks
+- `bench/`
+  - real-time streaming latency benchmark (public AISHELL / LibriSpeech test sets, downloaded)
 - `download_model.sh`
   - interactive small/large model downloader
 
