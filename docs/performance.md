@@ -16,19 +16,21 @@ only final text. Seconds, p50 / p90:
 
 | Model, device, chunk | zh shown | zh committed | en shown | en committed | busy (zh / en) | CER zh / WER en |
 |---|---|---|---|---|---|---|
-| 0.6B, CPU, 2 s | 1.33 / 2.24 | 3.90 / 5.30 | 1.54 / 2.53 | 3.01 / 4.21 | 26% / 29% | 2.5% / 1.8% |
-| 0.6B, GPU, 2 s | 1.08 / 1.98 | 3.63 / 5.07 | 1.27 / 2.24 | 2.75 / 3.94 | 13% / 16% | 2.5% / 1.8% |
-| 1.7B, CPU, 2 s | 1.90 / 2.88 | 4.62 / 6.08 | 2.14 / 3.23 | 3.65 / 4.92 | 54% / 62% | 0.9% / 1.8% |
-| 1.7B, GPU, 2 s | 1.26 / 2.15 | 3.99 / 5.44 | 1.45 / 2.45 | 2.97 / 4.13 | 23% / 27% | 0.9% / 2.5% |
-| 0.6B, CPU, 1 s | 0.79 / 1.43 | 3.33 / 4.60 | | | 46% | 2.2% |
-| 0.6B, GPU, 1 s | 0.57 / 1.18 | 3.06 / 4.34 | | | 22% | 2.2% |
-| 1.7B, GPU, 1 s | 0.65 / 1.25 | 3.37 / 4.63 | 0.85 / 1.60 | 2.31 / 3.31 | 36% / 43% | 0.9% / 4.5% |
+| 0.6B, CPU, 2 s | 1.35 / 2.24 | 3.99 / 5.42 | 1.58 / 2.57 | 3.69 / 5.14 | 28% / 32% | 2.7% / 2.5% |
+| 0.6B, GPU, 2 s | 1.11 / 1.94 | 3.74 / 5.03 | 1.30 / 2.27 | 3.37 / 4.75 | 14% / 17% | 2.5% / 2.5% |
+| 1.7B, CPU, 2 s | 1.96 / 2.93 | 4.72 / 6.02 | 2.22 / 3.27 | 4.34 / 5.74 | 60% / 66% | 1.1% / 2.5% |
+| 1.7B, GPU, 2 s | 1.29 / 2.17 | 4.01 / 5.78 | 1.46 / 2.48 | 3.54 / 5.04 | 25% / 29% | 1.1% / 1.8% |
+| 0.6B, CPU, 1 s | 0.74 / 1.37 | 3.12 / 4.27 | 1.00 / 1.73 | 2.39 / 3.29 | 48% / 53% | 2.5% / 1.8% |
+| 0.6B, GPU, 1 s | 0.52 / 1.12 | 2.89 / 4.07 | 0.73 / 1.45 | 2.11 / 3.06 | 22% / 26% | 2.5% / 2.5% |
+| 1.7B, GPU, 1 s | 0.62 / 1.21 | 3.18 / 4.30 | 0.83 / 1.57 | 2.27 / 3.14 | 38% / 44% | 0.9% / 1.8% |
+| 1.7B, CPU, 1 s | 1.52 / 2.74 | 4.27 / 5.85 | 4.87 / 9.60 | 6.55 / 11.37 | 96% / 104% | 0.9% / 1.8% |
 
-*busy* is compute time as a share of the audio duration; every configuration keeps up.
-The English 4.5% WER at 1 s chunks is one sentence emitted twice (12 inserted words);
-apart from it there are fewer errors than with 2 s chunks.
-Committed text trails the shown text by the rollback (5 tokens) and the unfixed first
-chunks. Word end times come from segment timestamps interpolated per character, so the
+*busy* is compute time as a share of the audio duration. Everything keeps up except 1.7B
+on the CPU with 1 s chunks, which runs at the limit and on English falls behind, so its
+latency grows over the stream.
+Committed text trails the shown text: the last 5 tokens (rollback) stay open, text is
+committed only once two steps decoded it the same, and the first chunks are not
+committed at all. A pause commits everything at once. Word end times come from segment timestamps interpolated per character, so the
 latencies are approximate.
 
 ## Offline Mode (Full + Segmented)

@@ -77,10 +77,10 @@ delay before a word is shown (180 s of Chinese speech):
 
 | Model, device | `--stream-chunk-sec 2` (default) | `--stream-chunk-sec 1` |
 |---|---|---|
-| 0.6B, CPU | 26% busy, shown after 1.3 s | 46% busy, shown after 0.8 s |
-| 0.6B, GPU | 13% busy, shown after 1.1 s | 22% busy, shown after 0.6 s |
-| 1.7B, CPU | 54% busy, shown after 1.9 s | not measured |
-| 1.7B, GPU | 23% busy, shown after 1.3 s | 36% busy, shown after 0.7 s |
+| 0.6B, CPU | 28% busy, shown after 1.4 s | 48% busy, shown after 0.7 s |
+| 0.6B, GPU | 14% busy, shown after 1.1 s | 22% busy, shown after 0.5 s |
+| 1.7B, CPU | 60% busy, shown after 2.0 s | 96% busy, shown after 1.5 s; falls behind on English |
+| 1.7B, GPU | 25% busy, shown after 1.3 s | 38% busy, shown after 0.6 s |
 
 Use 1 s when there is headroom (the GPU, or 0.6B on a fast CPU); raise it on slower
 hardware once the busy share approaches 100% and text starts to lag behind the audio.

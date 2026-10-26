@@ -16,7 +16,7 @@ appears on screen:
 | Offline, whole file (`-S 0`) | 13.1x | 23.7x | 7.0x | 11.3x | — |
 | Offline, 30 s segments (`-S 30`) | 14.7x | 24.8x | 7.1x | 11.8x | — |
 | Streaming (`--stream`) | 4.3x | 10.1x | 1.9x | 4.9x | 3.2x |
-| Live streaming latency, p50 (Chinese / English) | 1.33 / 1.54 s | 1.08 / 1.27 s | 1.90 / 2.14 s | 1.26 / 1.45 s | 0.65 / 0.85 s |
+| Live streaming latency, p50 (Chinese / English) | 1.35 / 1.58 s | 1.11 / 1.30 s | 1.96 / 2.22 s | 1.29 / 1.46 s | 0.62 / 0.83 s |
 
 Streaming re-decodes recent audio every chunk (2 s by default, `--stream-chunk-sec`) to
 keep the text stable, so it costs more than offline decoding; anything above 1x keeps up
