@@ -637,7 +637,7 @@ def run_regression(
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="qwen_asr regression suite (reference generation + quality checks)"
+        description="quickasr regression suite (reference generation + quality checks)"
     )
     ap.add_argument(
         "--samples-root",
@@ -646,8 +646,8 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument(
         "--binary",
-        default="./qwen_asr",
-        help="Path to qwen_asr binary (default: ./qwen_asr)",
+        default="./quickasr",
+        help="Path to quickasr binary (default: ./quickasr)",
     )
     ap.add_argument(
         "--model-dir",
@@ -676,7 +676,7 @@ def parse_args() -> argparse.Namespace:
         "--arg",
         action="append",
         default=[],
-        help="Extra arg forwarded to qwen_asr (can be repeated)",
+        help="Extra arg forwarded to quickasr (can be repeated)",
     )
     ap.add_argument(
         "--generate-missing",

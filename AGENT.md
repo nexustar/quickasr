@@ -4,11 +4,14 @@ and which behaviors are considered contractually stable.
 
 ## Project Scope
 
-Pure C inference engine for Qwen3-ASR speech-to-text models:
+quickasr: low-latency (especially streaming latency) speech-to-text runtime
+for consumer hardware, forked from antirez/qwen-asr. It runs the Qwen3-ASR
+models:
 - `Qwen3-ASR-0.6B`
 - `Qwen3-ASR-1.7B`
 
-Primary target is CPU inference (BLAS + architecture-specific SIMD paths).
+Primary target is CPU inference (BLAS + architecture-specific SIMD paths);
+`make gpu` adds an optional ggml GPU path (`--device gpu`).
 
 ## Source Of Truth
 
@@ -124,12 +127,12 @@ make gpu
 
 Smoke run:
 ```bash
-./qwen_asr -d qwen3-asr-0.6b -i samples/jfk.wav
+./quickasr -d qwen3-asr-0.6b -i samples/jfk.wav
 ```
 
 Stdin path:
 ```bash
-cat samples/jfk.wav | ./qwen_asr -d qwen3-asr-0.6b --stdin
+cat samples/jfk.wav | ./quickasr -d qwen3-asr-0.6b --stdin
 ```
 
 ## Regression Workflow
@@ -138,14 +141,14 @@ Primary suite:
 ```bash
 make test
 # equivalent to:
-./asr_regression.py --binary ./qwen_asr --model-dir qwen3-asr-1.7b
+./asr_regression.py --binary ./quickasr --model-dir qwen3-asr-1.7b
 ```
 
 Focused checks:
 ```bash
-./asr_regression.py --segment-check-only --binary ./qwen_asr --model-dir qwen3-asr-1.7b
-./asr_regression.py --stream-check-only --binary ./qwen_asr --model-dir qwen3-asr-1.7b
-./asr_regression.py --stream-cache-check-only --binary ./qwen_asr --stream-cache-model-dir qwen3-asr-0.6b
+./asr_regression.py --segment-check-only --binary ./quickasr --model-dir qwen3-asr-1.7b
+./asr_regression.py --stream-check-only --binary ./quickasr --model-dir qwen3-asr-1.7b
+./asr_regression.py --stream-cache-check-only --binary ./quickasr --stream-cache-model-dir qwen3-asr-0.6b
 ```
 
 Notes:
@@ -157,8 +160,8 @@ Notes:
 
 Reference management:
 ```bash
-./asr_regression.py --generate-missing --binary ./qwen_asr --model-dir qwen3-asr-1.7b
-./asr_regression.py --refresh-refs --binary ./qwen_asr --model-dir qwen3-asr-1.7b
+./asr_regression.py --generate-missing --binary ./quickasr --model-dir qwen3-asr-1.7b
+./asr_regression.py --refresh-refs --binary ./quickasr --model-dir qwen3-asr-1.7b
 ```
 
 ## Streaming Implementation Notes
@@ -225,7 +228,7 @@ After editing:
 3. Run regression:
    - at minimum relevant focused checks
    - ideally full `make test` for non-trivial changes
-4. Update `README.md` if CLI/runtime behavior changed.
+4. Update `README.md` and `docs/` if CLI/runtime behavior changed.
 5. Keep `AGENT.md` aligned if workflow/test defaults changed.
 
 ## Local-Only Artifacts (Do Not Depend On In Commits)

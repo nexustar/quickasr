@@ -1,12 +1,13 @@
-# qwen-asr
+# quickasr
 
-Prebuilt CLI for [qwen-asr](https://github.com/nexustar/qwen-asr), a pure C
-inference engine for Qwen3-ASR (0.6B / 1.7B) speech-to-text.
+Prebuilt CLI for [quickasr](https://github.com/nexustar/quickasr), a
+low-latency speech-to-text runtime for consumer hardware, running the
+Qwen3-ASR (0.6B / 1.7B) models.
 
 ## Install
 
 ```bash
-npm install -g qwen-asr
+npm install -g quickasr
 ```
 
 Supported platforms:
@@ -27,11 +28,11 @@ Supported platforms:
   the MinGW runtime are statically linked; no DLLs to install.
   `--device gpu` runs on the GPU through Vulkan (included with current GPU
   drivers).
-- With several GPUs, `qwen-asr --list-devices` lists them and
+- With several GPUs, `quickasr --list-devices` lists them and
   `--device <name>` (e.g. `Vulkan1`) picks one instead of the default.
 
-The binary for each platform is in its own package (`qwen-asr-darwin-arm64`,
-`qwen-asr-linux-x64`, ...), an optional dependency of `qwen-asr`; npm
+The binary for each platform is in its own package (`@quickasr/darwin-arm64`,
+`@quickasr/linux-x64`, ...), an optional dependency of `quickasr`; npm
 installs only the one for the machine.
 
 ## Usage
@@ -41,28 +42,28 @@ Model weights are not included. Download them from Hugging Face
 `download_model.sh`, then:
 
 ```bash
-qwen-asr -d qwen3-asr-0.6b -i audio.wav
-cat audio.wav | qwen-asr -d qwen3-asr-0.6b --stdin
-qwen-asr -h
+quickasr -d qwen3-asr-0.6b -i audio.wav
+cat audio.wav | quickasr -d qwen3-asr-0.6b --stdin
+quickasr -h
 ```
 
-See the [repository README](https://github.com/nexustar/qwen-asr#readme) for
+See the [repository README](https://github.com/nexustar/quickasr#readme) for
 all options (segmented mode, streaming, language forcing, ...).
 
 ## From Node
 
-Programs that run the binary themselves (rather than through the `qwen-asr`
+Programs that run the binary themselves (rather than through the `quickasr`
 launcher) can get its path:
 
 ```js
-const { binaryPath } = require('qwen-asr');
+const { binaryPath } = require('quickasr');
 
-const bin = binaryPath();  // e.g. .../node_modules/qwen-asr-darwin-arm64/qwen_asr
+const bin = binaryPath();  // e.g. .../node_modules/@quickasr/darwin-arm64/quickasr
 ```
 
 `binaryPath()` picks the arm64 binary for x64 Node under Rosetta, and throws
-an Error with `code` `QWEN_ASR_UNSUPPORTED_PLATFORM` (no binary for this
-OS / CPU architecture) or `QWEN_ASR_UNSUPPORTED_CPU` (CPU below the build
+an Error with `code` `QUICKASR_UNSUPPORTED_PLATFORM` (no binary for this
+OS / CPU architecture) or `QUICKASR_UNSUPPORTED_CPU` (CPU below the build
 baseline) when none can run here, for example when optional dependencies
 were not installed (`--omit=optional`). Add the package to
 `optionalDependencies` so installs on other platforms still succeed.

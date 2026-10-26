@@ -1,18 +1,18 @@
 {
-  "name": "qwen-asr",
+  "name": "quickasr",
   "version": "0.0.0",
-  "description": "Qwen3-ASR speech-to-text in pure C (prebuilt CLI binary)",
+  "description": "Low-latency speech-to-text runtime for consumer hardware, running Qwen3-ASR (prebuilt CLI binary)",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nexustar/qwen-asr.git"
+    "url": "git+https://github.com/nexustar/quickasr.git"
   },
-  "homepage": "https://github.com/nexustar/qwen-asr",
-  "keywords": ["asr", "speech-to-text", "qwen", "qwen3-asr", "transcription"],
+  "homepage": "https://github.com/nexustar/quickasr",
+  "keywords": ["asr", "streaming", "speech-to-text", "qwen", "qwen3-asr", "transcription"],
   "main": "index.js",
   "types": "index.d.ts",
   "bin": {
-    "qwen-asr": "bin/qwen-asr.js"
+    "quickasr": "bin/quickasr.js"
   },
   "files": [
     "index.js",
@@ -26,10 +26,10 @@
     "node": ">=16"
   },
   "optionalDependencies": {
-    "qwen-asr-darwin-arm64": "0.0.0",
-    "qwen-asr-darwin-x64": "0.0.0",
-    "qwen-asr-linux-x64": "0.0.0",
-    "qwen-asr-linux-arm64": "0.0.0",
-    "qwen-asr-win32-x64": "0.0.0"
+    "@quickasr/darwin-arm64": "0.0.0",
+    "@quickasr/darwin-x64": "0.0.0",
+    "@quickasr/linux-x64": "0.0.0",
+    "@quickasr/linux-arm64": "0.0.0",
+    "@quickasr/win32-x64": "0.0.0"
   }
 }

@@ -1,6 +1,10 @@
 *.o
-qwen_asr
-qwen_asr.exe
+quickasr
+quickasr.exe
+# Outputs from before the rename to quickasr and the npm split
+/qwen_asr
+/qwen_asr.exe
+npm/prebuilds/
 venv/
 venv312/
 qwen3-asr-0.6b/

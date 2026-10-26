@@ -133,7 +133,7 @@ jobs:
           path: npm/platforms/
           merge-multiple: true
 
-      - run: chmod +x npm/platforms/*/qwen_asr*
+      - run: chmod +x npm/platforms/*/quickasr*
 
       - uses: actions/cache@v6
         with:
@@ -144,13 +144,13 @@ jobs:
 
       - name: Transcribe sample via the npm launcher
         run: |
-          out=$(node npm/bin/qwen-asr.js -d qwen3-asr-0.6b -i samples/jfk.wav --silent)
+          out=$(node npm/bin/quickasr.js -d qwen3-asr-0.6b -i samples/jfk.wav --silent)
           echo "$out"
           echo "$out" | grep -qi "ask not what your country can do for you"
 
       - name: Transcribe from stdin
         run: |
-          out=$(node npm/bin/qwen-asr.js -d qwen3-asr-0.6b --stdin --silent < samples/jfk.wav)
+          out=$(node npm/bin/quickasr.js -d qwen3-asr-0.6b --stdin --silent < samples/jfk.wav)
           echo "$out"
           echo "$out" | grep -qi "ask what you can do for your country"
 
@@ -158,7 +158,7 @@ jobs:
       # that --device gpu falls back to the CPU instead of failing
       - name: Transcribe with --device gpu
         run: |
-          out=$(node npm/bin/qwen-asr.js -d qwen3-asr-0.6b -i samples/jfk.wav --device gpu)
+          out=$(node npm/bin/quickasr.js -d qwen3-asr-0.6b -i samples/jfk.wav --device gpu)
           echo "$out"
           echo "$out" | grep -qi "ask not what your country can do for you"
 
@@ -179,7 +179,7 @@ jobs:
           merge-multiple: true
 
       - run: |
-          chmod +x npm/platforms/*/qwen_asr*
+          chmod +x npm/platforms/*/quickasr*
           cp LICENSE npm/LICENSE
           ls -lR npm/platforms
 
@@ -191,7 +191,7 @@ jobs:
       # Trusted publishing needs npm >= 11.5.1
       - run: npm install -g npm@latest
 
-      # The qwen-asr-<platform> packages first, then qwen-asr, whose
+      # The @quickasr/<platform> packages first, then quickasr, whose
       # optionalDependencies pin them to the same version
       - name: Publish
         working-directory: npm

@@ -12,19 +12,19 @@ let bin;
 try {
   bin = binaryPath();
 } catch (e) {
-  console.error(`qwen-asr: ${e.message}.`);
-  console.error('Build from source: https://github.com/nexustar/qwen-asr');
+  console.error(`quickasr: ${e.message}.`);
+  console.error('Build from source: https://github.com/nexustar/quickasr');
   process.exit(1);
 }
 
-const r = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit', argv0: 'qwen-asr' });
+const r = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit', argv0: 'quickasr' });
 if (r.error) {
-  console.error(`qwen-asr: ${r.error.message}`);
+  console.error(`quickasr: ${r.error.message}`);
   process.exit(1);
 }
 if (r.signal) process.kill(process.pid, r.signal);
 if (r.status === STATUS_ILLEGAL_INSTRUCTION) {
-  console.error('qwen-asr: this CPU lacks AVX2/FMA (x86-64-v3 required).');
+  console.error('quickasr: this CPU lacks AVX2/FMA (x86-64-v3 required).');
   process.exit(1);
 }
 process.exit(r.status);

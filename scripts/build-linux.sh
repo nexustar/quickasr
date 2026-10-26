@@ -55,15 +55,15 @@ export VULKAN_SDK=$PWD/.vulkan
 make gpu ARCH_FLAGS="$arch_flags" \
     OPENBLAS_CFLAGS="-I$OPENBLAS_PREFIX/include" \
     OPENBLAS_LIBS="$OPENBLAS_PREFIX/lib/libopenblas.a"
-strip qwen_asr libggml*.so
+strip quickasr libggml*.so
 
 dir="npm/platforms/$key"
-cp qwen_asr libggml*.so "$dir/"
+cp quickasr libggml*.so "$dir/"
 cp LICENSE "$dir/LICENSE"
 cp "$OPENBLAS_PREFIX/LICENSE" "$dir/LICENSE-OpenBLAS"
 cp .ggml/src/LICENSE "$dir/LICENSE-ggml"
 cp LICENSE npm/LICENSE
 
-echo "glibc requirement: $(objdump -T qwen_asr libggml*.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
-for f in qwen_asr libggml*.so; do echo "$f needs: $(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')"; done
+echo "glibc requirement: $(objdump -T quickasr libggml*.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+for f in quickasr libggml*.so; do echo "$f needs: $(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')"; done
 ls -l "$dir"

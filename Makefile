@@ -1,4 +1,4 @@
-# qwen_asr — Qwen3-ASR Pure C Inference Engine
+# quickasr — low-latency speech-to-text runtime (Qwen3-ASR)
 # Makefile
 
 CC = gcc
@@ -15,9 +15,9 @@ SRCS = qwen_asr.c qwen_asr_kernels.c qwen_asr_kernels_generic.c qwen_asr_kernels
 OBJS = $(SRCS:.c=.o)
 MAIN = main.c
 ifeq ($(OS),Windows_NT)
-TARGET = qwen_asr.exe
+TARGET = quickasr.exe
 else
-TARGET = qwen_asr
+TARGET = quickasr
 endif
 
 # Debug build flags
@@ -29,7 +29,7 @@ DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
 all: help
 
 help:
-	@echo "qwen_asr — Qwen3-ASR Pure C Inference - Build Targets"
+	@echo "quickasr — Build Targets"
 	@echo ""
 	@echo "Choose a backend:"
 	@echo "  make blas     - With BLAS acceleration (Accelerate/OpenBLAS)"
@@ -37,12 +37,12 @@ help:
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make debug    - Debug build with AddressSanitizer"
-	@echo "  make test     - Run regression suite (requires ./qwen_asr and model files)"
+	@echo "  make test     - Run regression suite (requires ./quickasr and model files)"
 	@echo "  make test-stream-cache - Run stream cache on/off equivalence check"
 	@echo "  make clean    - Remove build artifacts"
 	@echo "  make info     - Show build configuration"
 	@echo ""
-	@echo "Example: make blas && ./qwen_asr -d model_dir -i audio.wav"
+	@echo "Example: make blas && ./quickasr -d model_dir -i audio.wav"
 
 # =============================================================================
 # Backend: blas (Accelerate on macOS, OpenBLAS on Linux and Windows)
@@ -128,7 +128,7 @@ debug:
 # Utilities
 # =============================================================================
 clean:
-	rm -f $(OBJS) main.o qwen_asr qwen_asr.exe libggml*.so* ggml*.dll
+	rm -f $(OBJS) main.o quickasr quickasr.exe libggml*.so* ggml*.dll
 
 info:
 	@echo "Platform: $(UNAME_S)"
@@ -141,7 +141,7 @@ else
 endif
 
 test:
-	./asr_regression.py --binary ./qwen_asr --model-dir qwen3-asr-1.7b
+	./asr_regression.py --binary ./quickasr --model-dir qwen3-asr-1.7b
 
 # =============================================================================
 # Dependencies

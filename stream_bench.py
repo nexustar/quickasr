@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Streaming benchmark for qwen_asr --stdin --stream.
+Streaming benchmark for quickasr --stdin --stream.
 
 Measures what the streaming layer loses or delays relative to the same
 model's offline transcript, so model recognition errors cancel out:
@@ -189,7 +189,7 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("audio", nargs="+", type=Path, help="audio files")
     ap.add_argument("-d", "--model-dir", required=True)
-    ap.add_argument("--binary", default="./qwen_asr")
+    ap.add_argument("--binary", default="./quickasr")
     ap.add_argument("--pace", action="store_true", help="feed in real time (needed for latency metrics)")
     ap.add_argument("--hold", type=float, default=0.0,
                     help="seconds to keep stdin open with no audio after the file ends")

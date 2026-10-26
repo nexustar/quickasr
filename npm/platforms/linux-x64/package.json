@@ -1,14 +1,14 @@
 {
-  "name": "qwen-asr-linux-x64",
+  "name": "@quickasr/linux-x64",
   "version": "0.0.0",
-  "description": "qwen_asr binary for Linux x86-64, installed by the qwen-asr package",
+  "description": "quickasr binary for Linux x86-64, installed by the quickasr package",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nexustar/qwen-asr.git"
+    "url": "git+https://github.com/nexustar/quickasr.git"
   },
-  "homepage": "https://github.com/nexustar/qwen-asr",
-  "files": ["qwen_asr*", "LICENSE*", "libggml*", "ggml*.dll"],
+  "homepage": "https://github.com/nexustar/quickasr",
+  "files": ["quickasr*", "LICENSE*", "libggml*", "ggml*.dll"],
   "os": ["linux"],
   "cpu": ["x64"]
 }

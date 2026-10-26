@@ -1,7 +1,7 @@
 /*
  * main.c - CLI entry point for Qwen3-ASR
  *
- * Usage: qwen_asr -d <model_dir> -i <input.wav> [options]
+ * Usage: quickasr -d <model_dir> -i <input.wav> [options]
  */
 
 #include "qwen_asr.h"
@@ -77,7 +77,7 @@ static int parse_past_text_mode(const char *s, int *out_mode) {
 }
 
 static void usage(const char *prog) {
-    fprintf(stderr, "qwen_asr — Qwen3-ASR speech-to-text (pure C)\n\n");
+    fprintf(stderr, "quickasr — Qwen3-ASR speech-to-text (pure C)\n\n");
     fprintf(stderr, "Usage: %s -d <model_dir> (-i <input.wav> | --stdin) [options]\n\n", prog);
     fprintf(stderr, "Required:\n");
     fprintf(stderr, "  -d <dir>      Model directory (with *.safetensors, vocab.json or tokenizer.json)\n");

@@ -25,15 +25,15 @@ esac
 export MACOSX_DEPLOYMENT_TARGET=13.3
 
 make "$target" ARCH_FLAGS="$arch_flags"
-strip qwen_asr
+strip quickasr
 # strip breaks the ad-hoc signature arm64 requires
-codesign --force --sign - qwen_asr
+codesign --force --sign - quickasr
 
 dir="npm/platforms/$key"
-cp qwen_asr "$dir/qwen_asr"
+cp quickasr "$dir/quickasr"
 cp LICENSE npm/LICENSE
 cp LICENSE "$dir/LICENSE"
 if [ "$target" = gpu ]; then cp .ggml/src/LICENSE "$dir/LICENSE-ggml"; fi
 
-echo "minimum macOS: $(otool -l qwen_asr | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
+echo "minimum macOS: $(otool -l quickasr | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
 ls -l "$dir"

@@ -44,14 +44,14 @@ fi
 make gpu ARCH_FLAGS="$arch_flags" \
     OPENBLAS_CFLAGS="-I$OPENBLAS_PREFIX/include" \
     OPENBLAS_LIBS="$OPENBLAS_PREFIX/lib/libopenblas.a -static"
-strip qwen_asr.exe ggml*.dll
+strip quickasr.exe ggml*.dll
 
 dir="npm/platforms/$key"
-cp qwen_asr.exe ggml*.dll "$dir/"
+cp quickasr.exe ggml*.dll "$dir/"
 cp LICENSE "$dir/LICENSE"
 cp "$OPENBLAS_PREFIX/LICENSE" "$dir/LICENSE-OpenBLAS"
 cp .ggml/src/LICENSE "$dir/LICENSE-ggml"
 cp LICENSE npm/LICENSE
 
-for f in qwen_asr.exe ggml*.dll; do echo "$f imports: $(objdump -p "$f" | awk '/DLL Name/{print $3}' | tr '\n' ' ')"; done
+for f in quickasr.exe ggml*.dll; do echo "$f imports: $(objdump -p "$f" | awk '/DLL Name/{print $3}' | tr '\n' ' ')"; done
 ls -l "$dir"

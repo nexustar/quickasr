@@ -1,7 +1,7 @@
 'use strict';
 
-// Locates the prebuilt qwen_asr binary for this machine. Used by the
-// qwen-asr launcher, and by programs that spawn the binary themselves.
+// Locates the prebuilt quickasr binary for this machine. Used by the
+// quickasr launcher, and by programs that spawn the binary themselves.
 
 const { execFileSync } = require('child_process');
 const fs = require('fs');
@@ -32,13 +32,13 @@ function unsupported(code, message) {
   return err;
 }
 
-// The binary comes in the qwen-asr-<key> package npm installs for this
+// The binary comes in the @quickasr/<key> package npm installs for this
 // platform (an optional dependency); in a repository checkout, from
 // npm/platforms/<key>.
 function binaryIn(key, exe) {
   let dir = null;
   try {
-    dir = path.dirname(require.resolve(`qwen-asr-${key}/package.json`));
+    dir = path.dirname(require.resolve(`@quickasr/${key}/package.json`));
   } catch (e) {
     dir = path.join(__dirname, 'platforms', key);
   }
@@ -47,11 +47,11 @@ function binaryIn(key, exe) {
 }
 
 // Absolute path of the binary. Throws an Error with code
-// QWEN_ASR_UNSUPPORTED_PLATFORM or QWEN_ASR_UNSUPPORTED_CPU when none can
+// QUICKASR_UNSUPPORTED_PLATFORM or QUICKASR_UNSUPPORTED_CPU when none can
 // run here.
 function binaryPath() {
   let key = platformKey();
-  const exe = process.platform === 'win32' ? 'qwen_asr.exe' : 'qwen_asr';
+  const exe = process.platform === 'win32' ? 'quickasr.exe' : 'quickasr';
   let bin = binaryIn(key, exe);
   // x64 Node under Rosetta gets only the x64 package from npm
   if (!bin && key === 'darwin-arm64' && process.arch === 'x64') {
@@ -59,8 +59,8 @@ function binaryPath() {
     bin = binaryIn(key, exe);
   }
   if (!bin) {
-    throw unsupported('QWEN_ASR_UNSUPPORTED_PLATFORM',
-      `no prebuilt binary for ${key} (the optional dependency qwen-asr-${key} is not installed)`);
+    throw unsupported('QUICKASR_UNSUPPORTED_PLATFORM',
+      `no prebuilt binary for ${key} (the optional dependency @quickasr/${key} is not installed)`);
   }
   const required = REQUIRED[key];
   if (required) {
@@ -72,7 +72,7 @@ function binaryPath() {
     } catch (e) {}
     const missing = have ? required.features.filter(f => !have.has(f)) : [];
     if (missing.length) {
-      throw unsupported('QWEN_ASR_UNSUPPORTED_CPU', `this CPU lacks ${missing.join(', ')} (${required.level} required)`);
+      throw unsupported('QUICKASR_UNSUPPORTED_CPU', `this CPU lacks ${missing.join(', ')} (${required.level} required)`);
     }
   }
   return bin;
