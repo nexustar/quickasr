@@ -84,7 +84,7 @@ ifeq ($(OS),Windows_NT)
 # Import libraries by path, so a -static in OPENBLAS_LIBS doesn't hide them
 GGML_LIBS = $(GGML_B)/src/libggml.dll.a $(GGML_B)/src/libggml-base.dll.a
 else
-GGML_LIBS = -L$(GGML_B)/src -L$(GGML_B)/bin -lggml -lggml-base -Wl,-rpath,'$$ORIGIN'
+GGML_LIBS = -L$(GGML_B)/src -L$(GGML_B)/bin -lggml -lggml-base
 endif
 gpu: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_OPENBLAS $(OPENBLAS_CFLAGS) -DUSE_GGML -DGGML_BACKEND_DL -I$(GGML_INC)
 gpu: LDFLAGS := $(OPENBLAS_LIBS) $(GGML_LIBS) $(LDFLAGS)
@@ -111,8 +111,17 @@ blas:
 # =============================================================================
 # Build rules
 # =============================================================================
+# The ggml libraries sit next to the binary. Added here, not in LDFLAGS: the
+# recursive make passes LDFLAGS through the shell, which would expand $ORIGIN.
+ifneq ($(UNAME_S),Darwin)
+ifneq ($(OS),Windows_NT)
+GGML_RPATH = $(if $(findstring -DUSE_GGML,$(CFLAGS)),-Wl$(comma)-rpath$(comma)'$$ORIGIN')
+endif
+endif
+comma := ,
+
 $(TARGET): $(OBJS) main.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(GGML_RPATH)
 
 %.o: %.c qwen_asr.h qwen_asr_kernels.h
 	$(CC) $(CFLAGS) -c -o $@ $<
