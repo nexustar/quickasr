@@ -17,6 +17,10 @@ int qwen_ggml_list_devices(int json);
 int qwen_ggml_decoder_init(qwen_ctx_t *ctx);
 void qwen_ggml_decoder_free(qwen_ctx_t *ctx);
 
+/* A GPU computation failed (out of memory, say): print an error and exit(1),
+ * rather than go on with a wrong result. */
+void qwen_ggml_lost(qwen_ctx_t *ctx);
+
 /* Run n embeddings at positions kv_cache_len.. and append them to the device
  * KV cache. With want_logits, the logits of all n rows are kept for
  * qwen_ggml_logits(). Does not advance ctx->kv_cache_len. 0 on success. */

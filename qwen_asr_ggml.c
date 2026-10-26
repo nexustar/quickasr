@@ -31,6 +31,8 @@ typedef struct {
 typedef struct {
     ggml_backend_t dev, cpu;
     ggml_backend_sched_t sched;
+    struct ggml_context *probe_ctx;
+    struct ggml_cgraph *probe;      /* empty graph, see compute() */
 
     struct ggml_context *wctx;
     ggml_backend_buffer_t wbuf;
@@ -282,6 +284,9 @@ int qwen_ggml_decoder_init(qwen_ctx_t *ctx) {
 
     ggml_backend_t backends[2] = { g->dev, g->cpu };
     g->sched = ggml_backend_sched_new(backends, NULL, 2, GRAPH_MAX, false, true);
+    struct ggml_init_params pp = { ggml_graph_overhead(), NULL, true };
+    g->probe_ctx = ggml_init(pp);
+    g->probe = ggml_new_graph(g->probe_ctx);
     g->meta_size = ggml_tensor_overhead() * GRAPH_MAX + ggml_graph_overhead_custom(GRAPH_MAX, false);
     g->meta = malloc(g->meta_size);
     if (!g->sched || !g->meta) { free(g); return -1; }
@@ -290,10 +295,27 @@ int qwen_ggml_decoder_init(qwen_ctx_t *ctx) {
     return 0;
 }
 
+/* Metal runs a graph asynchronously and reports a failed command buffer (out
+ * of memory, say) only by putting the backend into an error state, which the
+ * next graph sees. An empty graph after each one finds out at once. */
+static int compute(gdec_t *g, struct ggml_cgraph *gf) {
+    return ggml_backend_sched_graph_compute(g->sched, gf) == GGML_STATUS_SUCCESS &&
+           ggml_backend_graph_compute(g->dev, g->probe) == GGML_STATUS_SUCCESS;
+}
+
+void qwen_ggml_lost(qwen_ctx_t *ctx) {
+    (void)ctx;
+    fprintf(stderr, "GPU computation failed (out of GPU memory?); run with --device cpu\n");
+    /* _Exit: ggml's device destructors assert on the buffers still held */
+    fflush(NULL);
+    _Exit(1);
+}
+
 void qwen_ggml_decoder_free(qwen_ctx_t *ctx) {
     gdec_t *g = (gdec_t *)ctx->ggml_dec;
     if (!g) return;
     ggml_backend_sched_free(g->sched);
+    if (g->probe_ctx) ggml_free(g->probe_ctx);
     ggml_backend_buffer_free(g->kvbuf);
     ggml_free(g->kvctx);
     ggml_backend_buffer_free(g->wbuf);
@@ -429,7 +451,7 @@ int qwen_ggml_decode(qwen_ctx_t *ctx, const float *embeds, int n, int want_logit
             memcpy(&g->mask[(size_t)i * kv_len + j], j <= p0 + i ? &zero : &neg_inf, 2);
     ggml_backend_tensor_set(mask, g->mask, 0, mn * sizeof(ggml_fp16_t));
 
-    if (ggml_backend_sched_graph_compute(g->sched, gf) != GGML_STATUS_SUCCESS) { ggml_free(c); return -1; }
+    if (!compute(g, gf)) { ggml_free(c); qwen_ggml_lost(ctx); return -1; }
     report_sched(g, gf, logits ? (n > 1 ? "batch" : "decode") : "prefill");
 
     if (logits) {
@@ -653,12 +675,12 @@ float *qwen_ggml_encoder_forward(qwen_ctx_t *ctx, const float *mel, int mel_fram
     }
     ggml_backend_tensor_set(mask, m, 0, ggml_nbytes(mask));
 
-    int ok = ggml_backend_sched_graph_compute(g->sched, gf) == GGML_STATUS_SUCCESS;
+    int ok = compute(g, gf);
     if (ok) report_sched(g, gf, "encoder");
     if (ok) ggml_backend_tensor_get(x, out, 0, (size_t)T * cfg->enc_output_dim * sizeof(float));
     free(pe_host); free(buf); free(m);
     ggml_free(c);
-    if (!ok) { free(out); return NULL; }
+    if (!ok) { free(out); qwen_ggml_lost(ctx); return NULL; }
     *out_seq_len = T;
     return out;
 }
