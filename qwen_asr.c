@@ -1722,6 +1722,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int ep_hist_pos = 0;
     int ep_hist_count = 0;
     double trail_sil_sec = 0;       /* audio at the end with no speech frame */
+    float ep_thr = 0;               /* the pause test's speech threshold, last chunk */
     int chunk_no_speech = 0;        /* the pause test found no speech in this chunk */
     int known_text_before = 0;
     /* The first text after a restart can lack its leading space. */
@@ -1787,6 +1788,37 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 if (have != idle_seen_samples) {
                     idle_seen_samples = have;
                     idle_since_ms = now_ms;
+                }
+                /* End of speech while audio keeps coming: once the audio past
+                 * the last step ends in QWEN_STREAM_EP_SEC without a speech
+                 * frame, decode now instead of at the chunk boundary, so the
+                 * held text comes out a chunk earlier. */
+                if (ctx->skip_silence && ep_thr > 0 && held_text_tokens > 0 &&
+                    audio_cursor >= local_base_sample &&
+                    have - audio_cursor >= QWEN_STREAM_EP_FRAME &&
+                    (last_flush_samples < 0 || have - last_flush_samples >= QWEN_SAMPLE_RATE / 2)) {
+                    int64_t local_end = local_base_sample + local_n_samples;
+                    int64_t last_speech_end = -1;
+                    for (int64_t pos = audio_cursor; pos + QWEN_STREAM_EP_FRAME <= have;
+                         pos += QWEN_STREAM_EP_FRAME) {
+                        float fe = 0.0f;
+                        for (int k = 0; k < QWEN_STREAM_EP_FRAME; k++) {
+                            int64_t q = pos + k;
+                            float v = q < local_end ? local_samples[q - local_base_sample]
+                                                    : live->samples[q - live->sample_offset];
+                            fe += v * v;
+                        }
+                        if (sqrtf(fe / QWEN_STREAM_EP_FRAME) > ep_thr)
+                            last_speech_end = pos + QWEN_STREAM_EP_FRAME;
+                    }
+                    double trailing = last_speech_end >= 0
+                        ? (double)(have - last_speech_end) / QWEN_SAMPLE_RATE
+                        : trail_sil_sec + (double)(have - audio_cursor) / QWEN_SAMPLE_RATE;
+                    if (trailing >= QWEN_STREAM_EP_SEC) {
+                        is_flush = 1;
+                        last_flush_samples = have;
+                        break;
+                    }
                 }
                 /* First the idle flush; once nothing is pending, the pause
                  * reset if the stall goes on. */
@@ -1956,6 +1988,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     trail_sil_sec += (double)chunk_len / QWEN_SAMPLE_RATE;
                 }
                 chunk_no_speech = (sp_thr > 0 && !had_speech);
+                ep_thr = sp_thr;
 
                 /* Stream-mode silence skip: when --skip-silence is on, drop
                  * the encoder/decoder/emit work for chunks without speech.
