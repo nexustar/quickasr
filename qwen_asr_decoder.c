@@ -520,7 +520,8 @@ static int ensure_batch_buffers(const qwen_config_t *cfg, int n) {
     int kv_dim = cfg->dec_kv_heads * cfg->dec_head_dim;
     int inter = cfg->dec_intermediate;
 #define GROW(p, cnt) do { void *t_ = realloc((p), (size_t)(cnt) * n * sizeof(float)); \
-                          if (!t_) return -1; (p) = (float *)t_; } while (0)
+                          if (!t_) return -1; \
+                          (p) = (float *)t_; } while (0)
     GROW(bx, dim); GROW(bx_norm, dim); GROW(bq, q_dim); GROW(bk, kv_dim); GROW(bv, kv_dim);
     GROW(battn, q_dim); GROW(bproj, dim); GROW(bgate, 2 * inter); GROW(bffn, dim);
 #undef GROW
