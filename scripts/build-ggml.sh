@@ -25,7 +25,8 @@ if [ -z "${GGML_SRC:-}" ] && [ "$(cat "$src/.version" 2>/dev/null)" != "$GGML_VE
         echo "ggml $GGML_VERSION: checksum mismatch" >&2
         exit 1
     fi
-    tar -xzf "$tarball" -C "$out"
+    # .pi/ holds only a symlink (agent notes), which MSYS2 tar cannot create
+    tar -xzf "$tarball" -C "$out" --exclude="ggml-$GGML_VERSION/.pi"
     rm "$tarball"
     mv "$out/ggml-$GGML_VERSION" "$src"
     echo "$GGML_VERSION" > "$src/.version"
@@ -44,9 +45,12 @@ case "$(uname -s)" in
 esac
 gen=()
 if [ -n "${MSYSTEM:-}" ]; then
-    # MinGW runtime (libstdc++, libgcc, winpthread) linked into the DLLs
+    # MinGW runtime (libstdc++, libgcc, winpthread) linked into the DLLs, but
+    # not exported: ggml-base re-exported _Unwind_Resume, which then clashed
+    # with the copy linked into ggml-cpu and ggml-vulkan
     gen=(-G "MSYS Makefiles")
-    opts+=(-DCMAKE_SHARED_LINKER_FLAGS=-static -DCMAKE_MODULE_LINKER_FLAGS=-static)
+    rt="-static -Wl,--exclude-libs,libgcc.a:libgcc_eh.a:libstdc++.a:libwinpthread.a"
+    opts+=("-DCMAKE_SHARED_LINKER_FLAGS=$rt" "-DCMAKE_MODULE_LINKER_FLAGS=$rt")
 fi
 
 cmake -S "$src" -B "$build" ${gen[@]+"${gen[@]}"} "${opts[@]}" >/dev/null
