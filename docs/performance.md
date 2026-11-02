@@ -44,8 +44,8 @@ Same streams and machine, CPU, 2 s chunks, 180 s each. Peak RSS includes mapped 
 | 1.7B | bf16 | 1.12% / 2.48% | 1.76 / 2.10 | 2.00 / 2.30 | 7.0 GB |
 | 1.7B | int8 | 1.12% / 1.81% | 1.46 / 1.74 | 1.84 / 2.13 | 4.3 GB |
 
-The model files are 1.35 GB (0.6B) and 3.19 GB (1.7B). The int8 kernels are NEON and
-generic for now, so x86-64 runs the generic ones and has not been measured.
+The model files are 1.35 GB (0.6B) and 3.19 GB (1.7B). The AVX2 int8 kernels have not
+been measured on real x86-64 hardware.
 
 ## Offline Mode (Full + Segmented)
 

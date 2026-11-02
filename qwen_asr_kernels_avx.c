@@ -499,4 +499,89 @@ void qwen_vec_scale_add_avx(float *dst, const float *src, float correction, int 
 #endif
 }
 
+/* =====================================================================
+ * Int8 dot products over blocks of 32 (Q8)
+ * ===================================================================== */
+
+/* AVX2 has no signed int8 dot product. maddubs takes unsigned * signed, so x's
+ * sign moves onto w. Weights and activations are within +-127, so a pair adds up
+ * to at most 2 * 127 * 127 and maddubs cannot saturate. */
+static inline __m256i q8_dot32_avx2(__m256i abs_x, __m256i x, const int8_t *w) {
+    __m256i sw = _mm256_sign_epi8(_mm256_loadu_si256((const __m256i *)w), x);
+    return _mm256_madd_epi16(_mm256_maddubs_epi16(abs_x, sw), _mm256_set1_epi16(1));
+}
+
+static inline float q8_hsum_i32(__m256i v) {
+    __m128i s = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0x4e));
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0xb1));
+    return (float)_mm_cvtsi128_si32(s);
+}
+
+/* Two rows at a time so each activation block is loaded once. The integer sum of
+ * a block is exact; summing the floats instead would round differently from the
+ * generic kernel. */
+static void q8_rows2_avx2(const int8_t *xq, const float *xd,
+                          const int8_t *w0, const float *d0,
+                          const int8_t *w1, const float *d1,
+                          int nb, float *s0_out, float *s1_out) {
+    float a0 = 0.0f, a1 = 0.0f;
+    for (int b = 0; b < nb; b++) {
+        __m256i x = _mm256_loadu_si256((const __m256i *)(xq + b * 32));
+        __m256i ax = _mm256_abs_epi8(x);
+        a0 += q8_hsum_i32(q8_dot32_avx2(ax, x, w0 + b * 32)) * (d0[b] * xd[b]);
+        a1 += q8_hsum_i32(q8_dot32_avx2(ax, x, w1 + b * 32)) * (d1[b] * xd[b]);
+    }
+    *s0_out = a0;
+    *s1_out = a1;
+}
+
+static float q8_row_avx2(const int8_t *xq, const float *xd,
+                         const int8_t *w, const float *d, int nb) {
+    float a = 0.0f;
+    for (int b = 0; b < nb; b++) {
+        __m256i x = _mm256_loadu_si256((const __m256i *)(xq + b * 32));
+        a += q8_hsum_i32(q8_dot32_avx2(_mm256_abs_epi8(x), x, w + b * 32)) * (d[b] * xd[b]);
+    }
+    return a;
+}
+
+void qwen_q8_matvec_avx(float *y, const int8_t *xq, const float *xd,
+                        const int8_t *wq, const float *wd, int in_dim, int out_dim) {
+    int nb = in_dim / 32;
+    int o = 0;
+    for (; o + 1 < out_dim; o += 2) {
+        q8_rows2_avx2(xq, xd,
+                      wq + (size_t)o * in_dim, wd + (size_t)o * nb,
+                      wq + (size_t)(o + 1) * in_dim, wd + (size_t)(o + 1) * nb,
+                      nb, &y[o], &y[o + 1]);
+    }
+    for (; o < out_dim; o++)
+        y[o] = q8_row_avx2(xq, xd, wq + (size_t)o * in_dim, wd + (size_t)o * nb, nb);
+}
+
+void qwen_argmax_q8_range_avx(const int8_t *xq, const float *xd,
+                              const int8_t *wq, const float *wd, int in_dim,
+                              int start, int end, int *best_out, float *best_val_out) {
+    int nb = in_dim / 32;
+    int best = start;
+    float best_val = -1e30f;
+    int o = start;
+    for (; o + 1 < end; o += 2) {
+        float s0, s1;
+        q8_rows2_avx2(xq, xd,
+                      wq + (size_t)o * in_dim, wd + (size_t)o * nb,
+                      wq + (size_t)(o + 1) * in_dim, wd + (size_t)(o + 1) * nb,
+                      nb, &s0, &s1);
+        if (s0 > best_val) { best_val = s0; best = o; }
+        if (s1 > best_val) { best_val = s1; best = o + 1; }
+    }
+    for (; o < end; o++) {
+        float s = q8_row_avx2(xq, xd, wq + (size_t)o * in_dim, wd + (size_t)o * nb, nb);
+        if (s > best_val) { best_val = s; best = o; }
+    }
+    *best_out = best;
+    *best_val_out = best_val;
+}
+
 #endif /* __AVX2__ && __FMA__ */

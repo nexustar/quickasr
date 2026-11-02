@@ -59,9 +59,14 @@ void qwen_vec_scale_inplace_avx(float *dst, float scale, int n);
 void qwen_vec_axpy_inplace_avx(float *dst, const float *src, float alpha, int n);
 void qwen_vec_scale_add_avx(float *dst, const float *src, float correction, int n);
 
-/* TODO: AVX2 int8 kernels; the generic ones are used for now. */
-#define qwen_q8_matvec_impl qwen_q8_matvec_generic
-#define qwen_argmax_q8_range_impl qwen_argmax_q8_range_generic
+void qwen_q8_matvec_avx(float *y, const int8_t *xq, const float *xd,
+                        const int8_t *wq, const float *wd, int in_dim, int out_dim);
+void qwen_argmax_q8_range_avx(const int8_t *xq, const float *xd,
+                              const int8_t *wq, const float *wd, int in_dim,
+                              int start, int end, int *best_out, float *best_val_out);
+
+#define qwen_q8_matvec_impl qwen_q8_matvec_avx
+#define qwen_argmax_q8_range_impl qwen_argmax_q8_range_avx
 #define qwen_bf16_matvec_fused_impl qwen_bf16_matvec_fused_avx
 #define qwen_argmax_bf16_range_impl qwen_argmax_bf16_range_avx
 #define qwen_dot_f32_impl qwen_dot_f32_avx
