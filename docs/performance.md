@@ -33,6 +33,20 @@ committed only once two steps decoded it the same, and the first chunks are not
 committed at all. A pause commits everything at once. Word end times come from segment timestamps interpolated per character, so the
 latencies are approximate.
 
+### Int8 Models (`--quantize-q8`)
+
+Same streams and machine, CPU, 2 s chunks, 180 s each. Peak RSS includes mapped pages.
+
+| Model | Format | err zh / en | CPU s per s of audio (zh / en) | shown p50 zh / en | Peak RSS |
+|---|---|---|---|---|---|
+| 0.6B | bf16 | 2.68% / 2.48% | 0.73 / 0.92 | 1.33 / 1.57 | 3.0 GB |
+| 0.6B | int8 | 2.46% / 2.48% | 0.63 / 0.76 | 1.30 / 1.58 | 2.2 GB |
+| 1.7B | bf16 | 1.12% / 2.48% | 1.76 / 2.10 | 2.00 / 2.30 | 7.0 GB |
+| 1.7B | int8 | 1.12% / 1.81% | 1.46 / 1.74 | 1.84 / 2.13 | 4.3 GB |
+
+The model files are 1.35 GB (0.6B) and 3.19 GB (1.7B). The int8 kernels are NEON and
+generic for now, so x86-64 runs the generic ones and has not been measured.
+
 ## Offline Mode (Full + Segmented)
 
 | Setup | Audio | 0.6B CPU | 0.6B GPU | 1.7B CPU | 1.7B GPU |

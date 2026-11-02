@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <pthread.h>
+#include "qwen_asr_kernels.h"
 
 /* ========================================================================
  * Constants
@@ -151,11 +152,15 @@ typedef struct {
 
     /* Fused gate+up weight for single-token matvec [2*intermediate, hidden] */
     uint16_t *gate_up_fused_bf16;
+
+    /* int8 weights of a --quantize-q8 model; the bf16 ones above are then NULL */
+    qwen_q8_t wq_q8, wk_q8, wv_q8, wo_q8, gate_up_q8, down_q8;
 } qwen_dec_layer_t;
 
 typedef struct {
     /* Token embeddings (tied with lm_head) */
     uint16_t *tok_embeddings_bf16; /* [vocab_size, hidden] */
+    qwen_q8_t lm_head_q8;          /* int8 model: the argmax; lookups stay on the bf16 table */
 
     /* Transformer layers */
     qwen_dec_layer_t layers[QWEN_MAX_DEC_LAYERS];
@@ -281,6 +286,12 @@ typedef struct {
 
 /* Load model from directory */
 qwen_ctx_t *qwen_load(const char *model_dir);
+
+/* __metadata__ value of models from qwen_quantize_model(); bump on layout changes */
+#define QWEN_Q8_FORMAT "q8-1"
+
+/* Write an int8 copy of a model to out_dir (see MODEL.md); 0 on success. */
+int qwen_quantize_model(const char *model_dir, const char *out_dir);
 
 /* Free all resources */
 void qwen_free(qwen_ctx_t *ctx);

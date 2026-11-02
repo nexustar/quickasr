@@ -62,6 +62,8 @@ Architecture/background references:
 - Decoder uses causal Qwen3 with KV cache and prefill reuse.
 - Encoder weights are loaded as f32 (converted at load where needed).
 - Decoder large weights are bf16 mmapped and consumed via bf16 kernels.
+- Int8 models (`--quantize-q8`) are detected from their weights: decoder weights are int8
+  mmapped and consumed via q8 kernels, CPU only (`gpu` falls back, a device name fails).
 
 ## Important Defaults
 
@@ -93,6 +95,8 @@ From `qwen_load()` and CLI:
   - tokenizer encode/decode
 - `qwen_asr_safetensors.c`
   - safetensors loading and mmap
+- `qwen_asr_quantize.c`
+  - `--quantize-q8`: writes an int8 copy of a model (format in `MODEL.md`)
 - `qwen_asr_kernels.c`
   - common math, threading, BLAS paths
 - `qwen_asr_kernels_generic.c`

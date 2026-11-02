@@ -80,6 +80,7 @@ Common options:
 | `-S <secs>` | Segmented offline mode for long files |
 | `--language <name>` | Force the language (otherwise auto-detected), e.g. `Chinese`, `English` |
 | `--prompt <text>` | System prompt to bias spelling, e.g. `"Preserve spelling: PostgreSQL"` |
+| `--quantize-q8 <dir>` | Write an int8 copy of the `-d` model to `<dir>` and exit: CPU only, faster, about half the memory |
 | `--skip-silence` | Skip silent audio; on by default with `--stdin --stream` (`--no-skip-silence` turns it off) |
 | `--silent` / `--debug` | Only the text on stdout / verbose diagnostics on stderr |
 

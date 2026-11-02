@@ -43,6 +43,48 @@ static uint16_t *load_bf16_direct(multi_safetensors_t *ms, const char *name) {
     return safetensors_get_bf16_direct(sf, t);
 }
 
+/* A --quantize-q8 weight: "<base>.q8" (I8) + "<base>.q8d" (F32 block scales). */
+static int load_q8(multi_safetensors_t *ms, const char *base, int rows, int cols, qwen_q8_t *w) {
+    char name[512];
+    safetensors_file_t *sf = NULL;
+    snprintf(name, sizeof(name), "%s.q8", base);
+    const safetensor_t *qs = multi_safetensors_find(ms, name, &sf);
+    if (!qs || qs->dtype != DTYPE_I8 || qs->ndim != 2 ||
+        qs->shape[0] != rows || qs->shape[1] != cols) {
+        fprintf(stderr, "decoder: bad int8 weight %s\n", name);
+        return -1;
+    }
+    w->qs = (const int8_t *)safetensors_data(sf, qs);
+    snprintf(name, sizeof(name), "%s.q8d", base);
+    const safetensor_t *d = multi_safetensors_find(ms, name, &sf);
+    if (!d || d->dtype != DTYPE_F32 || d->ndim != 2 || d->shape[0] != rows ||
+        d->shape[1] != cols / QWEN_Q8_BLOCK) {
+        fprintf(stderr, "decoder: bad int8 scales %s\n", name);
+        return -1;
+    }
+    w->d = (const float *)safetensors_data(sf, d);
+    if ((uintptr_t)w->d % sizeof(float)) {
+        fprintf(stderr, "decoder: unaligned int8 scales %s\n", name);
+        return -1;
+    }
+    w->rows = rows;
+    w->cols = cols;
+    return 0;
+}
+
+/* Use the int8 weight of a --quantize-q8 model when there is one. */
+static void dec_linear(float *y, const float *x, const uint16_t *w_bf16, const qwen_q8_t *w_q8,
+                       int seq_len, int in_dim, int out_dim) {
+    if (w_q8->qs) qwen_linear_nobias_q8(y, x, w_q8, seq_len, in_dim, out_dim);
+    else qwen_linear_nobias_bf16(y, x, w_bf16, seq_len, in_dim, out_dim);
+}
+
+static void dec_matvec_multi(float *y, int ldy, const float *x, int ldx, const uint16_t *w_bf16,
+                             const qwen_q8_t *w_q8, int in_dim, int out_dim, int nx) {
+    if (w_q8->qs) qwen_matvec_q8_multi(y, ldy, x, ldx, w_q8, in_dim, out_dim, nx);
+    else qwen_matvec_bf16_multi(y, ldy, x, ldx, w_bf16, in_dim, out_dim, nx);
+}
+
 int qwen_decoder_load(qwen_decoder_t *dec, multi_safetensors_t *ms,
                        const qwen_config_t *cfg) {
     char name[512];
@@ -53,19 +95,50 @@ int qwen_decoder_load(qwen_decoder_t *dec, multi_safetensors_t *ms,
     dec->tok_embeddings_bf16 = load_bf16_direct(ms, name);
     if (!dec->tok_embeddings_bf16) return -1;
 
+    int dim = cfg->dec_hidden;
+    int q_dim = cfg->dec_heads * cfg->dec_head_dim;
+    int kv_dim = cfg->dec_kv_heads * cfg->dec_head_dim;
+    int inter = cfg->dec_intermediate;
+
+    /* Models from --quantize-q8 hold int8 weights instead of the bf16 ones */
+    safetensors_file_t *q8_sf = NULL;
+    snprintf(name, sizeof(name), "%slm_head.q8", pfx);
+    int q8 = multi_safetensors_find(ms, name, &q8_sf) != NULL;
+    if (q8) {
+        if (!strstr(q8_sf->header_json, "\"quickasr_format\":\"" QWEN_Q8_FORMAT "\"")) {
+            fprintf(stderr, "decoder: unsupported int8 model format, need %s\n", QWEN_Q8_FORMAT);
+            return -1;
+        }
+        snprintf(name, sizeof(name), "%slm_head", pfx);
+        if (load_q8(ms, name, cfg->vocab_size, dim, &dec->lm_head_q8) != 0) return -1;
+    }
+
     /* Transformer layers */
     for (int i = 0; i < cfg->dec_layers; i++) {
         qwen_dec_layer_t *l = &dec->layers[i];
 
-        /* Attention weights (bf16, no bias) */
-        snprintf(name, sizeof(name), "%slayers.%d.self_attn.q_proj.weight", pfx, i);
-        l->wq_weight_bf16 = load_bf16_direct(ms, name);
-        snprintf(name, sizeof(name), "%slayers.%d.self_attn.k_proj.weight", pfx, i);
-        l->wk_weight_bf16 = load_bf16_direct(ms, name);
-        snprintf(name, sizeof(name), "%slayers.%d.self_attn.v_proj.weight", pfx, i);
-        l->wv_weight_bf16 = load_bf16_direct(ms, name);
-        snprintf(name, sizeof(name), "%slayers.%d.self_attn.o_proj.weight", pfx, i);
-        l->wo_weight_bf16 = load_bf16_direct(ms, name);
+        if (q8) {
+            static const char *const parts[] = { "self_attn.q_proj", "self_attn.k_proj",
+                "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_up", "mlp.down_proj" };
+            qwen_q8_t *w[] = { &l->wq_q8, &l->wk_q8, &l->wv_q8, &l->wo_q8,
+                               &l->gate_up_q8, &l->down_q8 };
+            int rows[] = { q_dim, kv_dim, kv_dim, dim, 2 * inter, dim };
+            int cols[] = { dim, dim, dim, q_dim, dim, inter };
+            for (int p = 0; p < 6; p++) {
+                snprintf(name, sizeof(name), "%slayers.%d.%s", pfx, i, parts[p]);
+                if (load_q8(ms, name, rows[p], cols[p], w[p]) != 0) return -1;
+            }
+        } else {
+            /* Attention weights (bf16, no bias) */
+            snprintf(name, sizeof(name), "%slayers.%d.self_attn.q_proj.weight", pfx, i);
+            l->wq_weight_bf16 = load_bf16_direct(ms, name);
+            snprintf(name, sizeof(name), "%slayers.%d.self_attn.k_proj.weight", pfx, i);
+            l->wk_weight_bf16 = load_bf16_direct(ms, name);
+            snprintf(name, sizeof(name), "%slayers.%d.self_attn.v_proj.weight", pfx, i);
+            l->wv_weight_bf16 = load_bf16_direct(ms, name);
+            snprintf(name, sizeof(name), "%slayers.%d.self_attn.o_proj.weight", pfx, i);
+            l->wo_weight_bf16 = load_bf16_direct(ms, name);
+        }
 
         /* Per-head Q/K RMSNorm weights */
         snprintf(name, sizeof(name), "%slayers.%d.self_attn.q_norm.weight", pfx, i);
@@ -78,6 +151,8 @@ int qwen_decoder_load(qwen_decoder_t *dec, multi_safetensors_t *ms,
         l->input_norm = load_f32(ms, name);
         snprintf(name, sizeof(name), "%slayers.%d.post_attention_layernorm.weight", pfx, i);
         l->post_attn_norm = load_f32(ms, name);
+
+        if (q8) continue;
 
         /* SwiGLU MLP weights (bf16, no bias) */
         snprintf(name, sizeof(name), "%slayers.%d.mlp.gate_proj.weight", pfx, i);
@@ -96,7 +171,6 @@ int qwen_decoder_load(qwen_decoder_t *dec, multi_safetensors_t *ms,
 
         /* Fuse gate+up weights: interleave rows [gate_row0, up_row0, gate_row1, up_row1, ...] */
         {
-            int inter = cfg->dec_intermediate;
             int hidden = cfg->dec_hidden;
             size_t row_bytes = (size_t)hidden * sizeof(uint16_t);
             l->gate_up_fused_bf16 = (uint16_t *)malloc(2 * (size_t)inter * row_bytes);
@@ -107,7 +181,6 @@ int qwen_decoder_load(qwen_decoder_t *dec, multi_safetensors_t *ms,
                        l->up_weight_bf16 + (size_t)r * hidden, row_bytes);
             }
         }
-
     }
 
     /* Final RMSNorm */
@@ -330,9 +403,9 @@ void qwen_decoder_prefill(qwen_ctx_t *ctx, const float *input_embeds, int seq_le
         qwen_rms_norm(x_norm, x, l->input_norm, seq_len, dim, eps);
 
         /* QKV projections (no bias) */
-        qwen_linear_nobias_bf16(q, x_norm, l->wq_weight_bf16, seq_len, dim, q_dim);
-        qwen_linear_nobias_bf16(k, x_norm, l->wk_weight_bf16, seq_len, dim, kv_dim);
-        qwen_linear_nobias_bf16(v, x_norm, l->wv_weight_bf16, seq_len, dim, kv_dim);
+        dec_linear(q, x_norm, l->wq_weight_bf16, &l->wq_q8, seq_len, dim, q_dim);
+        dec_linear(k, x_norm, l->wk_weight_bf16, &l->wk_q8, seq_len, dim, kv_dim);
+        dec_linear(v, x_norm, l->wv_weight_bf16, &l->wv_q8, seq_len, dim, kv_dim);
 
         /* Per-head Q/K RMSNorm */
         qwen_rms_norm_per_head(q, l->q_norm_weight, seq_len, n_heads, head_dim, eps);
@@ -359,19 +432,19 @@ void qwen_decoder_prefill(qwen_ctx_t *ctx, const float *input_embeds, int seq_le
                                head_dim, scale, start_pos);
 
         /* Output projection + residual */
-        qwen_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16,
-                                 seq_len, q_dim, dim);
+        dec_linear(proj_out, attn_out, l->wo_weight_bf16, &l->wo_q8,
+                   seq_len, q_dim, dim);
         qwen_add_inplace(x, proj_out, seq_len * dim);
 
         /* Post-attention RMSNorm */
         qwen_rms_norm(x_norm, x, l->post_attn_norm, seq_len, dim, eps);
 
         /* SwiGLU MLP */
-        qwen_linear_nobias_bf16(gate_up, x_norm, l->gate_up_fused_bf16,
-                                 seq_len, dim, 2 * intermediate);
+        dec_linear(gate_up, x_norm, l->gate_up_fused_bf16, &l->gate_up_q8,
+                   seq_len, dim, 2 * intermediate);
         qwen_swiglu_multiply(gate, gate_up, seq_len, intermediate);
-        qwen_linear_nobias_bf16(ffn_out, gate, l->down_weight_bf16,
-                                 seq_len, intermediate, dim);
+        dec_linear(ffn_out, gate, l->down_weight_bf16, &l->down_q8,
+                   seq_len, intermediate, dim);
 
         qwen_add_inplace(x, ffn_out, seq_len * dim);
 
@@ -462,7 +535,11 @@ int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
         qwen_dec_layer_t *l = &dec->layers[layer];
 
         qwen_rms_norm(x_norm, x, l->input_norm, 1, dim, eps);
-        qwen_linear_nobias_bf16_qkv(q, k, v, x_norm,
+        if (l->wq_q8.qs)
+            qwen_linear_nobias_q8_qkv(q, k, v, x_norm, &l->wq_q8, &l->wk_q8, &l->wv_q8,
+                                      dim, q_dim, kv_dim);
+        else
+            qwen_linear_nobias_bf16_qkv(q, k, v, x_norm,
                                     l->wq_weight_bf16,
                                     l->wk_weight_bf16,
                                     l->wv_weight_bf16,
@@ -487,17 +564,17 @@ int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
                                1, total_seq, n_heads, n_kv_heads,
                                head_dim, scale, pos);
 
-        qwen_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16, 1, q_dim, dim);
+        dec_linear(proj_out, attn_out, l->wo_weight_bf16, &l->wo_q8, 1, q_dim, dim);
         qwen_add_inplace(x, proj_out, dim);
 
         qwen_rms_norm(x_norm, x, l->post_attn_norm, 1, dim, eps);
 
         /* Fused gate+up matvec: one pass over x_norm, output interleaved [g0,u0,g1,u1,...] */
-        qwen_linear_nobias_bf16(gate_buf, x_norm, l->gate_up_fused_bf16,
-                                 1, dim, 2 * intermediate);
+        dec_linear(gate_buf, x_norm, l->gate_up_fused_bf16, &l->gate_up_q8,
+                   1, dim, 2 * intermediate);
         /* In-place for seq=1: gate_buf[0:inter] receives SwiGLU output. */
         qwen_swiglu_multiply(gate_buf, gate_buf, 1, intermediate);
-        qwen_linear_nobias_bf16(ffn_out, gate_buf, l->down_weight_bf16, 1, intermediate, dim);
+        dec_linear(ffn_out, gate_buf, l->down_weight_bf16, &l->down_q8, 1, intermediate, dim);
         qwen_add_inplace(x, ffn_out, dim);
     }
 
@@ -506,6 +583,8 @@ int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
     /* Final norm + streaming argmax (no logits buffer needed) */
     qwen_rms_norm(x, x, dec->norm, 1, dim, eps);
     decoder_last_x = x;
+    if (dec->lm_head_q8.qs)
+        return qwen_argmax_matvec_q8(x, &dec->lm_head_q8, dim, cfg->vocab_size);
     return qwen_argmax_matvec_bf16(x, dec->tok_embeddings_bf16, dim, cfg->vocab_size);
 }
 
@@ -568,9 +647,13 @@ int qwen_decoder_forward_batch(qwen_ctx_t *ctx, const float *embeds, int n, int 
         qwen_dec_layer_t *l = &dec->layers[layer];
 
         qwen_rms_norm(bx_norm, bx, l->input_norm, n, dim, eps);
-        qwen_matvec_bf16_qkv_multi(bq, bk, bv, bx_norm, dim,
-                                   l->wq_weight_bf16, l->wk_weight_bf16, l->wv_weight_bf16,
-                                   dim, q_dim, kv_dim, n);
+        if (l->wq_q8.qs)
+            qwen_matvec_q8_qkv_multi(bq, bk, bv, bx_norm, dim, &l->wq_q8, &l->wk_q8, &l->wv_q8,
+                                     dim, q_dim, kv_dim, n);
+        else
+            qwen_matvec_bf16_qkv_multi(bq, bk, bv, bx_norm, dim,
+                                       l->wq_weight_bf16, l->wk_weight_bf16, l->wv_weight_bf16,
+                                       dim, q_dim, kv_dim, n);
         qwen_rms_norm_per_head(bq, l->q_norm_weight, n, n_heads, head_dim, eps);
         qwen_rms_norm_per_head(bk, l->k_norm_weight, n, n_kv_heads, head_dim, eps);
         qwen_apply_rope_neox(bq, rope_cos, rope_sin, n, n_heads, head_dim);
@@ -587,22 +670,25 @@ int qwen_decoder_forward_batch(qwen_ctx_t *ctx, const float *embeds, int n, int 
                                   full_k, full_v, 1, pos + r + 1, n_heads, n_kv_heads,
                                   head_dim, scale, pos + r);
 
-        qwen_matvec_bf16_multi(bproj, dim, battn, q_dim, l->wo_weight_bf16, q_dim, dim, n);
+        dec_matvec_multi(bproj, dim, battn, q_dim, l->wo_weight_bf16, &l->wo_q8, q_dim, dim, n);
         qwen_add_inplace(bx, bproj, n * dim);
 
         qwen_rms_norm(bx_norm, bx, l->post_attn_norm, n, dim, eps);
-        qwen_matvec_bf16_multi(bgate, 2 * inter, bx_norm, dim, l->gate_up_fused_bf16,
-                               dim, 2 * inter, n);
+        dec_matvec_multi(bgate, 2 * inter, bx_norm, dim, l->gate_up_fused_bf16, &l->gate_up_q8,
+                         dim, 2 * inter, n);
         for (int r = 0; r < n; r++)
             qwen_swiglu_multiply(bgate + (size_t)r * 2 * inter, bgate + (size_t)r * 2 * inter,
                                  1, inter);
-        qwen_matvec_bf16_multi(bffn, dim, bgate, 2 * inter, l->down_weight_bf16, inter, dim, n);
+        dec_matvec_multi(bffn, dim, bgate, 2 * inter, l->down_weight_bf16, &l->down_q8, inter, dim, n);
         qwen_add_inplace(bx, bffn, n * dim);
     }
 
     ctx->kv_cache_len = pos + n;
     qwen_rms_norm(bx, bx, dec->norm, n, dim, eps);
-    qwen_argmax_matvec_bf16_multi(bx, dim, dec->tok_embeddings_bf16, dim, cfg->vocab_size, n, pred);
+    if (dec->lm_head_q8.qs)
+        qwen_argmax_matvec_q8_multi(bx, dim, &dec->lm_head_q8, dim, cfg->vocab_size, n, pred);
+    else
+        qwen_argmax_matvec_bf16_multi(bx, dim, dec->tok_embeddings_bf16, dim, cfg->vocab_size, n, pred);
     decoder_last_x = bx + (size_t)(n - 1) * dim;
     return 0;
 }
@@ -621,6 +707,9 @@ int qwen_decoder_next_excluding(qwen_ctx_t *ctx, int excl) {
         return argmax_excl(qwen_ggml_logits(ctx, ggml_row), ctx->config.vocab_size, excl);
 #endif
     if (!decoder_last_x) return excl;
+    if (ctx->decoder.lm_head_q8.qs)
+        return qwen_argmax_matvec_q8_excl(decoder_last_x, &ctx->decoder.lm_head_q8,
+                                          ctx->config.dec_hidden, ctx->config.vocab_size, excl);
     return qwen_argmax_matvec_bf16_excl(decoder_last_x, ctx->decoder.tok_embeddings_bf16,
                                         ctx->config.dec_hidden, ctx->config.vocab_size, excl);
 }

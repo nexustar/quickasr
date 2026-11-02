@@ -345,6 +345,26 @@ Both layouts are detected automatically at load time.
 
 ---
 
+### Int8 models (`--quantize-q8`)
+
+A plain safetensors file with `"quickasr_format":"q8-1"` in `__metadata__`, in either
+naming layout. `qwen_asr_quantize.c` writes it, and the decoder recognizes it by
+`<dec>lm_head.q8`, where `<dec>` is `thinker.model.` or `model.language_model.`.
+
+| Tensor | Type | Shape |
+|---|---|---|
+| `<dec>layers.N.self_attn.{q,k,v,o}_proj.q8` | I8 | as the `.weight` it replaces |
+| `<dec>layers.N.mlp.down_proj.q8` | I8 | as the `.weight` it replaces |
+| `<dec>layers.N.mlp.gate_up.q8` | I8 | `[2*inter, hidden]`, gate and up rows interleaved |
+| `<dec>lm_head.q8` | I8 | `[vocab, hidden]`, quantized from the embeddings |
+| each of the above with `.q8d` | F32 | `[rows, cols/32]`, one scale per 32 weights |
+
+Each block of 32 weights is `q = round(v / d)` with `d = max|v| / 127`. Those tensors
+replace the seven linear weights of each layer and `lm_head`. Everything else is copied,
+including `embed_tokens.weight`, which must be BF16 at run time (F32 is converted).
+Tensors are sorted by descending element size so that `.q8d` is aligned in the mapped
+file. Bump `QWEN_Q8_FORMAT` when the layout changes.
+
 ## Decode Schedule
 
 Unlike Voxtral which adds audio+text embeddings at every position, Qwen3-ASR

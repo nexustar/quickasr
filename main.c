@@ -118,6 +118,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --prompt <text>            System prompt for biasing (example: \"Preserve spelling: CPU, CUDA, PostgreSQL, Redis\")\n");
     fprintf(stderr, "  --language <lang>          Force output language via token conditioning\n");
     fprintf(stderr, "                             (usually auto-detected if omitted)\n");
+    fprintf(stderr, "  --quantize-q8 <dir>        Write an int8 copy of the -d model to <dir> and exit\n");
+    fprintf(stderr, "                             (CPU only, faster, about half the memory)\n");
     fprintf(stderr, "  --monitor     Show inline Unicode symbols on stderr (streaming diagnostics)\n");
     fprintf(stderr, "  --debug       Debug output (per-layer details)\n");
     fprintf(stderr, "  --silent      No status output (only final transcription on stdout)\n");
@@ -149,6 +151,7 @@ int main(int argc, char **argv) {
     int past_text_conditioning_mode = -1; /* -1 auto, 0 off, 1 on */
     int skip_silence = -1;          /* -1: on for --stdin --stream */
     int list_devices = 0;
+    const char *quantize_out = NULL;
     int emit_tokens = 1;
 
     for (int i = 1; i < argc; i++) {
@@ -199,6 +202,8 @@ int main(int argc, char **argv) {
             skip_silence = 0;
         } else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             qwen_device = argv[++i];
+        } else if (strcmp(argv[i], "--quantize-q8") == 0 && i + 1 < argc) {
+            quantize_out = argv[++i];
         } else if (strcmp(argv[i], "--list-devices") == 0) {
             list_devices = 1;
             if (i + 1 < argc && strcmp(argv[i + 1], "json") == 0) {
@@ -231,6 +236,15 @@ int main(int argc, char **argv) {
         qwen_verbose = verbosity;
         qwen_set_threads(n_threads > 0 ? n_threads : qwen_get_num_cpus());
         return qwen_list_devices(list_devices == 2) == 0 ? 0 : 1;
+    }
+    if (quantize_out) {
+        if (!model_dir) {
+            usage(argv[0]);
+            return 1;
+        }
+        qwen_verbose = verbosity;
+        qwen_set_threads(n_threads > 0 ? n_threads : qwen_get_num_cpus());
+        return qwen_quantize_model(model_dir, quantize_out) == 0 ? 0 : 1;
     }
     if (!model_dir || (!input_wav && !use_stdin)) {
         usage(argv[0]);

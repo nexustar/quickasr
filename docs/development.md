@@ -71,6 +71,18 @@ platforms into `npm/platforms/<platform>/`, runs a transcription smoke test on
 each, and publishes the platform packages and then `quickasr` to npm.
 
 
+## Publishing An Int8 Model
+
+```bash
+./quickasr -d <source> --quantize-q8 <out>
+./asr_regression.py --binary ./quickasr --model-dir <out> --stream-cache-model-dir <0.6b-out>
+```
+
+`<out>` holds everything a model repository needs except a model card, which should name
+the source model and its revision, state that the weights were modified, and keep its
+license. An int8 model only runs on quickasr, so state the format (`q8-1`, see
+[MODEL.md](../MODEL.md)) and the first quickasr release that reads it.
+
 ## Regression Tests
 
 The repository includes `asr_regression.py` (repo root), a stdlib-only regression harness.

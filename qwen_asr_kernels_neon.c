@@ -214,6 +214,86 @@ void qwen_argmax_bf16_range_neon(const float *x, const uint16_t *W_bf16,
     *best_val_out = best_val;
 }
 
+/* Two rows at a time so each activation block is loaded once. With dotprod,
+ * vdotq_s32 does 16 int8 MACs per instruction; otherwise widen via vmull_s8. */
+static inline int32x4_t q8_dot16(int32x4_t acc, int8x16_t a, int8x16_t b) {
+#ifdef __ARM_FEATURE_DOTPROD
+    return vdotq_s32(acc, a, b);
+#else
+    int16x8_t lo = vmull_s8(vget_low_s8(a), vget_low_s8(b));
+    int16x8_t hi = vmull_s8(vget_high_s8(a), vget_high_s8(b));
+    return vpadalq_s16(vpadalq_s16(acc, lo), hi);
+#endif
+}
+
+static void q8_rows2_neon(const int8_t *xq, const float *xd,
+                          const int8_t *w0, const float *d0,
+                          const int8_t *w1, const float *d1,
+                          int nb, float *s0_out, float *s1_out) {
+    float32x4_t a0 = vdupq_n_f32(0.0f), a1 = vdupq_n_f32(0.0f);
+    for (int b = 0; b < nb; b++) {
+        int8x16_t x0 = vld1q_s8(xq + b * 32);
+        int8x16_t x1 = vld1q_s8(xq + b * 32 + 16);
+        int32x4_t p0 = q8_dot16(vdupq_n_s32(0), vld1q_s8(w0 + b * 32), x0);
+        int32x4_t p1 = q8_dot16(vdupq_n_s32(0), vld1q_s8(w1 + b * 32), x0);
+        p0 = q8_dot16(p0, vld1q_s8(w0 + b * 32 + 16), x1);
+        p1 = q8_dot16(p1, vld1q_s8(w1 + b * 32 + 16), x1);
+        a0 = vmlaq_n_f32(a0, vcvtq_f32_s32(p0), d0[b] * xd[b]);
+        a1 = vmlaq_n_f32(a1, vcvtq_f32_s32(p1), d1[b] * xd[b]);
+    }
+    *s0_out = vaddvq_f32(a0);
+    *s1_out = vaddvq_f32(a1);
+}
+
+static float q8_row_neon(const int8_t *xq, const float *xd,
+                         const int8_t *w, const float *d, int nb) {
+    float32x4_t a = vdupq_n_f32(0.0f);
+    for (int b = 0; b < nb; b++) {
+        int32x4_t p = q8_dot16(vdupq_n_s32(0), vld1q_s8(w + b * 32), vld1q_s8(xq + b * 32));
+        p = q8_dot16(p, vld1q_s8(w + b * 32 + 16), vld1q_s8(xq + b * 32 + 16));
+        a = vmlaq_n_f32(a, vcvtq_f32_s32(p), d[b] * xd[b]);
+    }
+    return vaddvq_f32(a);
+}
+
+void qwen_q8_matvec_neon(float *y, const int8_t *xq, const float *xd,
+                         const int8_t *wq, const float *wd, int in_dim, int out_dim) {
+    int nb = in_dim / 32;
+    int o = 0;
+    for (; o + 1 < out_dim; o += 2) {
+        q8_rows2_neon(xq, xd,
+                      wq + (size_t)o * in_dim, wd + (size_t)o * nb,
+                      wq + (size_t)(o + 1) * in_dim, wd + (size_t)(o + 1) * nb,
+                      nb, &y[o], &y[o + 1]);
+    }
+    for (; o < out_dim; o++)
+        y[o] = q8_row_neon(xq, xd, wq + (size_t)o * in_dim, wd + (size_t)o * nb, nb);
+}
+
+void qwen_argmax_q8_range_neon(const int8_t *xq, const float *xd,
+                               const int8_t *wq, const float *wd, int in_dim,
+                               int start, int end, int *best_out, float *best_val_out) {
+    int nb = in_dim / 32;
+    int best = start;
+    float best_val = -1e30f;
+    int o = start;
+    for (; o + 1 < end; o += 2) {
+        float s0, s1;
+        q8_rows2_neon(xq, xd,
+                      wq + (size_t)o * in_dim, wd + (size_t)o * nb,
+                      wq + (size_t)(o + 1) * in_dim, wd + (size_t)(o + 1) * nb,
+                      nb, &s0, &s1);
+        if (s0 > best_val) { best_val = s0; best = o; }
+        if (s1 > best_val) { best_val = s1; best = o + 1; }
+    }
+    for (; o < end; o++) {
+        float s = q8_row_neon(xq, xd, wq + (size_t)o * in_dim, wd + (size_t)o * nb, nb);
+        if (s > best_val) { best_val = s; best = o; }
+    }
+    *best_out = best;
+    *best_val_out = best_val;
+}
+
 float qwen_dot_f32_neon(const float *a, const float *b, int n) {
     int i = 0;
     float32x4_t acc0 = vdupq_n_f32(0.0f);

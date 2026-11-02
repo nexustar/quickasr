@@ -256,6 +256,14 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
         return NULL;
     }
     int on_gpu = qwen_device && strcasecmp(qwen_device, "cpu") != 0;
+    if (on_gpu && ctx->decoder.lm_head_q8.qs) {
+        fprintf(stderr, "qwen_load: int8 models run on the CPU\n");
+        if (strcasecmp(qwen_device, "gpu") != 0) {
+            qwen_free(ctx);
+            return NULL;
+        }
+        on_gpu = 0;
+    }
 #ifdef USE_GGML
     if (on_gpu) {
         int rc = qwen_ggml_decoder_init(ctx);
