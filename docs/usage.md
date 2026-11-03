@@ -134,8 +134,9 @@ quickasr can read works as a source, fine-tunes included, in F32 or BF16. An int
 detected from its weights, so it needs no option at run time.
 
 The decoder's weights are int8, used straight from the mapped file, so a process starts
-sooner and uses about half the memory. The encoder and the token embeddings keep their
-precision. Text can differ slightly from the source model.
+sooner and uses about half the memory. The encoder and the token embeddings, which are
+also the output layer, keep their precision. Text can differ slightly from the source
+model.
 
 Int8 models run on the CPU only. `--device gpu` falls back to the CPU with a note, and a
 device name fails. Keep the source model for the GPU path.

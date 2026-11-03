@@ -954,63 +954,6 @@ void qwen_linear_nobias_q8_qkv(float *q, float *k, float *v, const float *x,
     q8_matvec_run(&task);
 }
 
-typedef struct {
-    const qwen_q8_t *W;
-    int start;
-    int end;
-    int best_idx[QWEN_MAX_THREADS];
-    float best_val[QWEN_MAX_THREADS];
-} q8_argmax_task_t;
-
-static void q8_argmax_worker(int tid, int n_threads, void *arg) {
-    q8_argmax_task_t *t = (q8_argmax_task_t *)arg;
-    int n = t->end - t->start;
-    int chunk = (n + n_threads - 1) / n_threads;
-    int start = t->start + tid * chunk;
-    int end = start + chunk < t->end ? start + chunk : t->end;
-    t->best_idx[tid] = -1;
-    t->best_val[tid] = -1e30f;
-    if (start >= end) return;
-    qwen_argmax_q8_range_impl(q8_act_q, q8_act_d, t->W->qs, t->W->d, t->W->cols,
-                              start, end, &t->best_idx[tid], &t->best_val[tid]);
-}
-
-/* Argmax over rows [start, end) with the activation already quantized. */
-static int q8_argmax_rows(const qwen_q8_t *W, int start, int end, float *val_out) {
-    q8_argmax_task_t task = { .W = W, .start = start, .end = end };
-    int nt = tp.n_threads <= 1 ? 1 : tp.n_threads;
-    if (nt == 1) q8_argmax_worker(0, 1, &task);
-    else parallel_for(q8_argmax_worker, &task);
-    int best = -1;
-    float best_val = -1e30f;
-    for (int i = 0; i < nt; i++) {
-        if (task.best_idx[i] >= 0 && (best < 0 || task.best_val[i] > best_val)) {
-            best_val = task.best_val[i];
-            best = task.best_idx[i];
-        }
-    }
-    *val_out = best_val;
-    return best;
-}
-
-int qwen_argmax_matvec_q8(const float *x, const qwen_q8_t *W, int in_dim, int out_dim) {
-    float v;
-    if (q8_quantize_act(x, in_dim) != 0) return 0;
-    return q8_argmax_rows(W, 0, out_dim, &v);
-}
-
-int qwen_argmax_matvec_q8_excl(const float *x, const qwen_q8_t *W,
-                               int in_dim, int out_dim, int excl) {
-    int b1 = -1, b2 = -1;
-    float v1 = 0, v2 = 0;
-    if (q8_quantize_act(x, in_dim) != 0) return excl;
-    if (excl > 0) b1 = q8_argmax_rows(W, 0, excl, &v1);
-    if (excl + 1 < out_dim) b2 = q8_argmax_rows(W, excl + 1, out_dim, &v2);
-    if (b1 < 0) return b2;
-    if (b2 < 0) return b1;
-    return v2 > v1 ? b2 : b1;
-}
-
 /* The batched decoder path: nx independent activations, row by row. */
 void qwen_matvec_q8_multi(float *y, int ldy, const float *x, int ldx, const qwen_q8_t *W,
                           int in_dim, int out_dim, int nx) {
@@ -1027,11 +970,6 @@ void qwen_matvec_q8_qkv_multi(float *q, float *k, float *v, const float *x, int 
                                   Wq, Wk, Wv, in_dim, q_dim, kv_dim);
 }
 
-void qwen_argmax_matvec_q8_multi(const float *x, int ldx, const qwen_q8_t *W,
-                                 int in_dim, int out_dim, int nx, int *best) {
-    for (int i = 0; i < nx; i++)
-        best[i] = qwen_argmax_matvec_q8(x + (size_t)i * ldx, W, in_dim, out_dim);
-}
 
 /* ========================================================================
  * 2D Convolution (im2col + BLAS sgemm)

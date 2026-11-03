@@ -349,19 +349,21 @@ Both layouts are detected automatically at load time.
 
 A plain safetensors file with `"quickasr_format":"q8-1"` in `__metadata__`, in either
 naming layout. `qwen_asr_quantize.c` writes it, and the decoder recognizes it by
-`<dec>lm_head.q8`, where `<dec>` is `thinker.model.` or `model.language_model.`.
+`<dec>layers.0.self_attn.q_proj.q8`, where `<dec>` is `thinker.model.` or
+`model.language_model.`.
 
 | Tensor | Type | Shape |
 |---|---|---|
 | `<dec>layers.N.self_attn.{q,k,v,o}_proj.q8` | I8 | as the `.weight` it replaces |
 | `<dec>layers.N.mlp.down_proj.q8` | I8 | as the `.weight` it replaces |
 | `<dec>layers.N.mlp.gate_up.q8` | I8 | `[2*inter, hidden]`, gate and up rows interleaved |
-| `<dec>lm_head.q8` | I8 | `[vocab, hidden]`, quantized from the embeddings |
 | each of the above with `.q8d` | F32 | `[rows, cols/32]`, one scale per 32 weights |
 
 Each block of 32 weights is `q = round(v / d)` with `d = max|v| / 127`. Those tensors
-replace the seven linear weights of each layer and `lm_head`. Everything else is copied,
-including `embed_tokens.weight`, which must be BF16 at run time (F32 is converted).
+replace the seven linear weights of each layer, and the duplicate `lm_head.weight` is
+dropped. Everything else is copied, including `embed_tokens.weight`, which must be BF16 at
+run time (F32 is converted) and stays the bf16 lm_head: an int8 head flips near-tied
+logits and drops phrases.
 Tensors are sorted by descending element size so that `.q8d` is aligned in the mapped
 file. Bump `QWEN_Q8_FORMAT` when the layout changes.
 

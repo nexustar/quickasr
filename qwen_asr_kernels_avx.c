@@ -560,28 +560,5 @@ void qwen_q8_matvec_avx(float *y, const int8_t *xq, const float *xd,
         y[o] = q8_row_avx2(xq, xd, wq + (size_t)o * in_dim, wd + (size_t)o * nb, nb);
 }
 
-void qwen_argmax_q8_range_avx(const int8_t *xq, const float *xd,
-                              const int8_t *wq, const float *wd, int in_dim,
-                              int start, int end, int *best_out, float *best_val_out) {
-    int nb = in_dim / 32;
-    int best = start;
-    float best_val = -1e30f;
-    int o = start;
-    for (; o + 1 < end; o += 2) {
-        float s0, s1;
-        q8_rows2_avx2(xq, xd,
-                      wq + (size_t)o * in_dim, wd + (size_t)o * nb,
-                      wq + (size_t)(o + 1) * in_dim, wd + (size_t)(o + 1) * nb,
-                      nb, &s0, &s1);
-        if (s0 > best_val) { best_val = s0; best = o; }
-        if (s1 > best_val) { best_val = s1; best = o + 1; }
-    }
-    for (; o < end; o++) {
-        float s = q8_row_avx2(xq, xd, wq + (size_t)o * in_dim, wd + (size_t)o * nb, nb);
-        if (s > best_val) { best_val = s; best = o; }
-    }
-    *best_out = best;
-    *best_val_out = best_val;
-}
 
 #endif /* __AVX2__ && __FMA__ */

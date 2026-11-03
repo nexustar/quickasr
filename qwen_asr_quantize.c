@@ -3,8 +3,8 @@
  *
  * The output is a plain safetensors file. The decoder's linear weights become
  * "<name>.q8" (I8) + "<name>.q8d" (F32, one scale per 32 weights), gate and up
- * are stored fused as mlp.gate_up, and lm_head becomes an int8 copy of the
- * embedding table, which itself stays bf16 for token lookups. Tensors are
+ * are stored fused as mlp.gate_up. The embedding table, which is also lm_head,
+ * stays bf16: an int8 head flips near-tied logits and drops phrases. Tensors are
  * sorted by element size so that everything is aligned and can be used from
  * the mapped file. Everything else is copied as it is. See MODEL.md.
  */
@@ -233,15 +233,7 @@ static int build_plan(plan_t *p, multi_safetensors_t *ms, const char *pfx) {
     for (int l = 0; l <= max_layer; l++)
         if (add_gate_up(p, ms, pfx, l) != 0) return -1;
 
-    char name[300];
-    const safetensor_t *t = NULL;
-    snprintf(name, sizeof(name), "%sembed_tokens.weight", pfx);
-    float *emb = tensor_f32(ms, name, &t);
-    if (!emb) return -1;
-    snprintf(name, sizeof(name), "%slm_head", pfx);
-    int rc = add_q8(p, name, emb, t->shape[0], t->shape[1]);
-    free(emb);
-    return rc;
+    return 0;
 }
 
 static int cmp_items(const void *a, const void *b) {
@@ -336,7 +328,7 @@ int qwen_quantize_model(const char *model_dir, const char *out_dir) {
     const char *pfx = multi_safetensors_find(ms, "model.audio_tower.conv2d1.weight", NULL)
                           ? "model.language_model." : "thinker.model.";
     char name[300];
-    snprintf(name, sizeof(name), "%slm_head.q8", pfx);
+    snprintf(name, sizeof(name), "%slayers.0.self_attn.q_proj.q8", pfx);
     int rc = -1;
     plan_t *p = calloc(1, sizeof(plan_t));
     if (p) p->items = calloc(MAX_ITEMS, sizeof(item_t));

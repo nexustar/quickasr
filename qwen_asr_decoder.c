@@ -102,15 +102,13 @@ int qwen_decoder_load(qwen_decoder_t *dec, multi_safetensors_t *ms,
 
     /* Models from --quantize-q8 hold int8 weights instead of the bf16 ones */
     safetensors_file_t *q8_sf = NULL;
-    snprintf(name, sizeof(name), "%slm_head.q8", pfx);
+    snprintf(name, sizeof(name), "%slayers.0.self_attn.q_proj.q8", pfx);
     int q8 = multi_safetensors_find(ms, name, &q8_sf) != NULL;
     if (q8) {
         if (!strstr(q8_sf->header_json, "\"quickasr_format\":\"" QWEN_Q8_FORMAT "\"")) {
             fprintf(stderr, "decoder: unsupported int8 model format, need %s\n", QWEN_Q8_FORMAT);
             return -1;
         }
-        snprintf(name, sizeof(name), "%slm_head", pfx);
-        if (load_q8(ms, name, cfg->vocab_size, dim, &dec->lm_head_q8) != 0) return -1;
     }
 
     /* Transformer layers */
@@ -583,8 +581,6 @@ int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed) {
     /* Final norm + streaming argmax (no logits buffer needed) */
     qwen_rms_norm(x, x, dec->norm, 1, dim, eps);
     decoder_last_x = x;
-    if (dec->lm_head_q8.qs)
-        return qwen_argmax_matvec_q8(x, &dec->lm_head_q8, dim, cfg->vocab_size);
     return qwen_argmax_matvec_bf16(x, dec->tok_embeddings_bf16, dim, cfg->vocab_size);
 }
 
@@ -685,10 +681,7 @@ int qwen_decoder_forward_batch(qwen_ctx_t *ctx, const float *embeds, int n, int 
 
     ctx->kv_cache_len = pos + n;
     qwen_rms_norm(bx, bx, dec->norm, n, dim, eps);
-    if (dec->lm_head_q8.qs)
-        qwen_argmax_matvec_q8_multi(bx, dim, &dec->lm_head_q8, dim, cfg->vocab_size, n, pred);
-    else
-        qwen_argmax_matvec_bf16_multi(bx, dim, dec->tok_embeddings_bf16, dim, cfg->vocab_size, n, pred);
+    qwen_argmax_matvec_bf16_multi(bx, dim, dec->tok_embeddings_bf16, dim, cfg->vocab_size, n, pred);
     decoder_last_x = bx + (size_t)(n - 1) * dim;
     return 0;
 }
@@ -707,9 +700,6 @@ int qwen_decoder_next_excluding(qwen_ctx_t *ctx, int excl) {
         return argmax_excl(qwen_ggml_logits(ctx, ggml_row), ctx->config.vocab_size, excl);
 #endif
     if (!decoder_last_x) return excl;
-    if (ctx->decoder.lm_head_q8.qs)
-        return qwen_argmax_matvec_q8_excl(decoder_last_x, &ctx->decoder.lm_head_q8,
-                                          ctx->config.dec_hidden, ctx->config.vocab_size, excl);
     return qwen_argmax_matvec_bf16_excl(decoder_last_x, ctx->decoder.tok_embeddings_bf16,
                                         ctx->config.dec_hidden, ctx->config.vocab_size, excl);
 }

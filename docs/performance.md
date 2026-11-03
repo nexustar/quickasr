@@ -40,12 +40,13 @@ Same streams and machine, CPU, 2 s chunks, 180 s each. Peak RSS includes mapped 
 | Model | Format | err zh / en | CPU s per s of audio (zh / en) | shown p50 zh / en | Peak RSS |
 |---|---|---|---|---|---|
 | 0.6B | bf16 | 2.68% / 2.48% | 0.73 / 0.92 | 1.33 / 1.57 | 3.0 GB |
-| 0.6B | int8 | 2.46% / 2.48% | 0.63 / 0.76 | 1.30 / 1.58 | 2.2 GB |
+| 0.6B | int8 | 2.46% / 2.48% | 0.64 / 0.80 | 1.33 / 1.55 | 2.3 GB |
 | 1.7B | bf16 | 1.12% / 2.48% | 1.76 / 2.10 | 2.00 / 2.30 | 7.0 GB |
-| 1.7B | int8 | 1.12% / 1.81% | 1.46 / 1.74 | 1.84 / 2.13 | 4.3 GB |
+| 1.7B | int8 | 1.12% / 2.48% | 1.49 / 1.80 | 1.88 / 2.15 | 4.5 GB |
 
-The model files are 1.35 GB (0.6B) and 3.19 GB (1.7B). The AVX2 int8 kernels have not
-been measured on real x86-64 hardware.
+The model files are 1.18 GB (0.6B) and 2.84 GB (1.7B). The output layer stays bf16; an
+int8 one was 2-4% faster but flips near-tied tokens. The AVX2 int8 kernels have not been
+measured on real x86-64 hardware.
 
 ## Offline Mode (Full + Segmented)
 

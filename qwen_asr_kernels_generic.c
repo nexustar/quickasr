@@ -64,22 +64,6 @@ void qwen_q8_matvec_generic(float *y, const int8_t *xq, const float *xd,
         y[o] = q8_row_dot_generic(xq, xd, wq + (size_t)o * in_dim, wd + (size_t)o * nb, nb);
 }
 
-void qwen_argmax_q8_range_generic(const int8_t *xq, const float *xd,
-                                  const int8_t *wq, const float *wd, int in_dim,
-                                  int start, int end, int *best_out, float *best_val_out) {
-    int nb = in_dim / 32;
-    int best = start;
-    float best_val = -1e30f;
-    for (int o = start; o < end; o++) {
-        float sum = q8_row_dot_generic(xq, xd, wq + (size_t)o * in_dim, wd + (size_t)o * nb, nb);
-        if (sum > best_val) {
-            best_val = sum;
-            best = o;
-        }
-    }
-    *best_out = best;
-    *best_val_out = best_val;
-}
 
 float qwen_dot_f32_generic(const float *a, const float *b, int n) {
     float sum = 0.0f;

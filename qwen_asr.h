@@ -160,7 +160,6 @@ typedef struct {
 typedef struct {
     /* Token embeddings (tied with lm_head) */
     uint16_t *tok_embeddings_bf16; /* [vocab_size, hidden] */
-    qwen_q8_t lm_head_q8;          /* int8 model: the argmax; lookups stay on the bf16 table */
 
     /* Transformer layers */
     qwen_dec_layer_t layers[QWEN_MAX_DEC_LAYERS];

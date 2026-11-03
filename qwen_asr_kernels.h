@@ -85,16 +85,11 @@ void qwen_linear_nobias_q8_qkv(float *q, float *k, float *v, const float *x,
                                const qwen_q8_t *Wq, const qwen_q8_t *Wk,
                                const qwen_q8_t *Wv,
                                int in_dim, int q_dim, int kv_dim);
-int qwen_argmax_matvec_q8(const float *x, const qwen_q8_t *W, int in_dim, int out_dim);
-int qwen_argmax_matvec_q8_excl(const float *x, const qwen_q8_t *W,
-                               int in_dim, int out_dim, int excl);
 void qwen_matvec_q8_multi(float *y, int ldy, const float *x, int ldx, const qwen_q8_t *W,
                           int in_dim, int out_dim, int nx);
 void qwen_matvec_q8_qkv_multi(float *q, float *k, float *v, const float *x, int ldx,
                               const qwen_q8_t *Wq, const qwen_q8_t *Wk, const qwen_q8_t *Wv,
                               int in_dim, int q_dim, int kv_dim, int nx);
-void qwen_argmax_matvec_q8_multi(const float *x, int ldx, const qwen_q8_t *W,
-                                 int in_dim, int out_dim, int nx, int *best);
 
 /* ========================================================================
  * 2D Convolution (for audio encoder conv stem)

@@ -256,7 +256,7 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
         return NULL;
     }
     int on_gpu = qwen_device && strcasecmp(qwen_device, "cpu") != 0;
-    if (on_gpu && ctx->decoder.lm_head_q8.qs) {
+    if (on_gpu && ctx->decoder.layers[0].wq_q8.qs) {
         fprintf(stderr, "qwen_load: int8 models run on the CPU\n");
         if (strcasecmp(qwen_device, "gpu") != 0) {
             qwen_free(ctx);
