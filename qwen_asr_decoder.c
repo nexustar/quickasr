@@ -47,7 +47,10 @@ static uint16_t *load_bf16_direct(multi_safetensors_t *ms, const char *name) {
 static int load_q8(multi_safetensors_t *ms, const char *base, int rows, int cols, qwen_q8_t *w) {
     char name[512];
     safetensors_file_t *sf = NULL;
-    snprintf(name, sizeof(name), "%s.q8", base);
+    if (snprintf(name, sizeof(name), "%s.q8", base) >= (int)sizeof(name)) {
+        fprintf(stderr, "decoder: weight name too long: %s\n", base);
+        return -1;
+    }
     const safetensor_t *qs = multi_safetensors_find(ms, name, &sf);
     if (!qs || qs->dtype != DTYPE_I8 || qs->ndim != 2 ||
         qs->shape[0] != rows || qs->shape[1] != cols) {
@@ -55,7 +58,10 @@ static int load_q8(multi_safetensors_t *ms, const char *base, int rows, int cols
         return -1;
     }
     w->qs = (const int8_t *)safetensors_data(sf, qs);
-    snprintf(name, sizeof(name), "%s.q8d", base);
+    if (snprintf(name, sizeof(name), "%s.q8d", base) >= (int)sizeof(name)) {
+        fprintf(stderr, "decoder: weight name too long: %s\n", base);
+        return -1;
+    }
     const safetensor_t *d = multi_safetensors_find(ms, name, &sf);
     if (!d || d->dtype != DTYPE_F32 || d->ndim != 2 || d->shape[0] != rows ||
         d->shape[1] != cols / QWEN_Q8_BLOCK) {
