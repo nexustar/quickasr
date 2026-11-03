@@ -518,9 +518,9 @@ static inline float q8_hsum_i32(__m256i v) {
     return (float)_mm_cvtsi128_si32(s);
 }
 
-/* Two rows at a time so each activation block is loaded once. The integer sum of
- * a block is exact; summing the floats instead would round differently from the
- * generic kernel. */
+/* Two rows at a time so each activation block is loaded once. Each block's
+ * integer dot product is summed exactly before it is scaled, as in the
+ * definition; results still differ from the generic kernel in the last bits. */
 static void q8_rows2_avx2(const int8_t *xq, const float *xd,
                           const int8_t *w0, const float *d0,
                           const int8_t *w1, const float *d1,
