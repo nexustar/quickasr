@@ -119,7 +119,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --language <lang>          Force output language via token conditioning\n");
     fprintf(stderr, "                             (usually auto-detected if omitted)\n");
     fprintf(stderr, "  --quantize-q8 <dir>        Write an int8 copy of the -d model to <dir> and exit\n");
-    fprintf(stderr, "                             (CPU only, faster, about half the memory)\n");
+    fprintf(stderr, "                             (CPU only, smaller, uses less memory)\n");
     fprintf(stderr, "  --monitor     Show inline Unicode symbols on stderr (streaming diagnostics)\n");
     fprintf(stderr, "  --debug       Debug output (per-layer details)\n");
     fprintf(stderr, "  --silent      No status output (only final transcription on stdout)\n");
