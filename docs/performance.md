@@ -33,7 +33,7 @@ committed only once two steps decoded it the same, and the first chunks are not
 committed at all. A pause commits everything at once. Word end times come from segment timestamps interpolated per character, so the
 latencies are approximate.
 
-### Int8 Models (`--quantize-q8`)
+### Int8 Models (`quickasr quantize`)
 
 Same streams and machine, CPU, 2 s chunks, 180 s each. Peak RSS includes mapped pages.
 

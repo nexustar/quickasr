@@ -1,5 +1,5 @@
 /*
- * qwen_asr_quantize.c - --quantize-q8: write an int8 copy of a model
+ * qwen_asr_quantize.c - quickasr quantize: write an int8 copy of a model
  *
  * The output is a plain safetensors file. The decoder's linear weights become
  * "<name>.q8" (I8) + "<name>.q8d" (F32, one scale per 32 weights), gate and up

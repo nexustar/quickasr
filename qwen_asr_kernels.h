@@ -74,7 +74,7 @@ typedef struct {
     int cols;
 } qwen_q8_t;
 
-/* Quantize a f32 [rows, cols] matrix (--quantize-q8). */
+/* Quantize a f32 [rows, cols] matrix (quickasr quantize). */
 void qwen_q8_from_f32(int8_t *qs, float *d, const float *src, int rows, int cols);
 
 /* seq=1: x is quantized to int8 blocks and dotted with int8 weights;

@@ -345,7 +345,7 @@ Both layouts are detected automatically at load time.
 
 ---
 
-### Int8 models (`--quantize-q8`)
+### Int8 models (`quickasr quantize`)
 
 A plain safetensors file with `"quickasr_format":"q8-1"` in `__metadata__`, in either
 naming layout. `qwen_asr_quantize.c` writes it, and the decoder recognizes it by

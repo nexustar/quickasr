@@ -74,7 +74,7 @@ each, and publishes the platform packages and then `quickasr` to npm.
 ## Publishing An Int8 Model
 
 ```bash
-./quickasr -d <source> --quantize-q8 <out>
+./quickasr quantize <source> <out>
 ./asr_regression.py --binary ./quickasr --model-dir <out> --stream-cache-model-dir <0.6b-out>
 ```
 

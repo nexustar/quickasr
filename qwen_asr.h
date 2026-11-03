@@ -153,7 +153,7 @@ typedef struct {
     /* Fused gate+up weight for single-token matvec [2*intermediate, hidden] */
     uint16_t *gate_up_fused_bf16;
 
-    /* int8 weights of a --quantize-q8 model; the bf16 ones above are then NULL */
+    /* int8 weights of a `quickasr quantize` model; the bf16 ones above are then NULL */
     qwen_q8_t wq_q8, wk_q8, wv_q8, wo_q8, gate_up_q8, down_q8;
 } qwen_dec_layer_t;
 

@@ -80,16 +80,16 @@ Common options:
 | `-S <secs>` | Segmented offline mode for long files |
 | `--language <name>` | Force the language (otherwise auto-detected), e.g. `Chinese`, `English` |
 | `--prompt <text>` | System prompt to bias spelling, e.g. `"Preserve spelling: PostgreSQL"` |
-| `--quantize-q8 <dir>` | Write an int8 copy of the `-d` model to `<dir>` and exit: CPU only, smaller, uses less memory |
 | `--skip-silence` | Skip silent audio; on by default with `--stdin --stream` (`--no-skip-silence` turns it off) |
 | `--silent` / `--debug` | Only the text on stdout / verbose diagnostics on stderr |
 
-`./quickasr -h` lists every option.
+`./quickasr -h` lists every option. `./quickasr quantize <model_dir> <out_dir>` writes an
+int8 copy of a model, smaller and lighter on memory, for the CPU.
 
 ## Documentation
 
 - [docs/streaming.md](docs/streaming.md): how streaming works, defaults, `--stream-json` and its event log, picking `--stream-chunk-sec`, `--monitor`
-- [docs/usage.md](docs/usage.md): offline and segmented modes, `--past-text`, silence skipping, GPU devices, language, prompt, stdin
+- [docs/usage.md](docs/usage.md): offline and segmented modes, `--past-text`, silence skipping, GPU devices, int8 models, language, prompt, stdin
 - [docs/performance.md](docs/performance.md): all benchmarks and memory use
 - [docs/development.md](docs/development.md): building (Linux, Windows, Vulkan), npm packages and releases, regression tests, C API
 - [MODEL.md](MODEL.md): model architecture and weight format

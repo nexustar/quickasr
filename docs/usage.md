@@ -122,10 +122,10 @@ Notes:
 - Without a `make gpu` build, `--device gpu` prints a notice and runs on the CPU.
 - Vulkan (Linux, Windows) has not been benchmarked yet.
 
-## Int8 Models (`--quantize-q8`)
+## Int8 Models (`quickasr quantize`)
 
 ```bash
-./quickasr -d qwen3-asr-0.6b --quantize-q8 qwen3-asr-0.6b-q8
+./quickasr quantize qwen3-asr-0.6b qwen3-asr-0.6b-q8
 ./quickasr -d qwen3-asr-0.6b-q8 -i audio.wav --stream
 ```
 

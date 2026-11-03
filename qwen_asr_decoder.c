@@ -43,7 +43,7 @@ static uint16_t *load_bf16_direct(multi_safetensors_t *ms, const char *name) {
     return safetensors_get_bf16_direct(sf, t);
 }
 
-/* A --quantize-q8 weight: "<base>.q8" (I8) + "<base>.q8d" (F32 block scales). */
+/* A `quickasr quantize` weight: "<base>.q8" (I8) + "<base>.q8d" (F32 block scales). */
 static int load_q8(multi_safetensors_t *ms, const char *base, int rows, int cols, qwen_q8_t *w) {
     char name[512];
     safetensors_file_t *sf = NULL;
@@ -72,7 +72,7 @@ static int load_q8(multi_safetensors_t *ms, const char *base, int rows, int cols
     return 0;
 }
 
-/* Use the int8 weight of a --quantize-q8 model when there is one. */
+/* Use the int8 weight of a `quickasr quantize` model when there is one. */
 static void dec_linear(float *y, const float *x, const uint16_t *w_bf16, const qwen_q8_t *w_q8,
                        int seq_len, int in_dim, int out_dim) {
     if (w_q8->qs) qwen_linear_nobias_q8(y, x, w_q8, seq_len, in_dim, out_dim);
@@ -100,7 +100,7 @@ int qwen_decoder_load(qwen_decoder_t *dec, multi_safetensors_t *ms,
     int kv_dim = cfg->dec_kv_heads * cfg->dec_head_dim;
     int inter = cfg->dec_intermediate;
 
-    /* Models from --quantize-q8 hold int8 weights instead of the bf16 ones */
+    /* Models from `quickasr quantize` hold int8 weights instead of the bf16 ones */
     safetensors_file_t *q8_sf = NULL;
     snprintf(name, sizeof(name), "%slayers.0.self_attn.q_proj.q8", pfx);
     int q8 = multi_safetensors_find(ms, name, &q8_sf) != NULL;
