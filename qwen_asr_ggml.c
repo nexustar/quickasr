@@ -37,6 +37,7 @@ typedef struct {
     struct ggml_context *wctx;
     ggml_backend_buffer_t wbuf;
     struct ggml_tensor *tok_emb;    /* [dim, vocab] f16, tied lm_head */
+    /* decoder layer weights: f16, or Q8_0 for an int8 model */
     struct ggml_tensor *norm;
     gdec_layer_t layers[QWEN_MAX_DEC_LAYERS];
 
@@ -95,6 +96,36 @@ static int upload_bf16(struct ggml_tensor *t, const uint16_t *src) {
     }
     free(f);
     free(h);
+    return 0;
+}
+
+/* An int8 model's weight as ggml Q8_0: per 32 weights an fp16 scale and the
+ * 32 int8 values. Rows first_row, first_row + row_step, ... of w (gate and up
+ * are interleaved in the fused matrix). */
+static int upload_q8(struct ggml_tensor *t, const qwen_q8_t *w, int first_row, int row_step) {
+    int rows = (int)t->ne[1], cols = (int)t->ne[0], nb = cols / QWEN_Q8_BLOCK;
+    size_t row_bytes = ggml_row_size(GGML_TYPE_Q8_0, cols);
+    if (cols != w->cols || row_bytes != (size_t)nb * (2 + QWEN_Q8_BLOCK)) return -1;
+    const int chunk_rows = 256;
+    uint8_t *buf = (uint8_t *)malloc((size_t)chunk_rows * row_bytes);
+    if (!buf) return -1;
+    for (int r0 = 0; r0 < rows; r0 += chunk_rows) {
+        int n = rows - r0 < chunk_rows ? rows - r0 : chunk_rows;
+        for (int r = 0; r < n; r++) {
+            size_t src = (size_t)(first_row + (size_t)(r0 + r) * row_step);
+            const int8_t *qs = w->qs + src * cols;
+            const float *d = w->d + src * nb;
+            uint8_t *out = buf + (size_t)r * row_bytes;
+            for (int b = 0; b < nb; b++) {
+                ggml_fp16_t h = ggml_fp32_to_fp16(d[b]);
+                memcpy(out, &h, 2);
+                memcpy(out + 2, qs + (size_t)b * QWEN_Q8_BLOCK, QWEN_Q8_BLOCK);
+                out += 2 + QWEN_Q8_BLOCK;
+            }
+        }
+        ggml_backend_tensor_set(t, buf, (size_t)r0 * row_bytes, (size_t)n * row_bytes);
+    }
+    free(buf);
     return 0;
 }
 
@@ -244,6 +275,9 @@ int qwen_ggml_decoder_init(qwen_ctx_t *ctx) {
     int inter = cfg->dec_intermediate;
     int hd = cfg->dec_head_dim;
 
+    int q8 = dec->layers[0].wq_q8.qs != NULL;
+    enum ggml_type wt = q8 ? GGML_TYPE_Q8_0 : GGML_TYPE_F16;
+
     struct ggml_init_params p = { (size_t)(16 * cfg->dec_layers + 4) * ggml_tensor_overhead(), NULL, true };
     g->wctx = ggml_init(p);
     struct ggml_context *c = g->wctx;
@@ -251,13 +285,13 @@ int qwen_ggml_decoder_init(qwen_ctx_t *ctx) {
     g->norm = ggml_new_tensor_1d(c, GGML_TYPE_F32, dim);
     for (int i = 0; i < cfg->dec_layers; i++) {
         gdec_layer_t *L = &g->layers[i];
-        L->wq = ggml_new_tensor_2d(c, GGML_TYPE_F16, dim, q_dim);
-        L->wk = ggml_new_tensor_2d(c, GGML_TYPE_F16, dim, kv_dim);
-        L->wv = ggml_new_tensor_2d(c, GGML_TYPE_F16, dim, kv_dim);
-        L->wo = ggml_new_tensor_2d(c, GGML_TYPE_F16, q_dim, dim);
-        L->gate = ggml_new_tensor_2d(c, GGML_TYPE_F16, dim, inter);
-        L->up = ggml_new_tensor_2d(c, GGML_TYPE_F16, dim, inter);
-        L->down = ggml_new_tensor_2d(c, GGML_TYPE_F16, inter, dim);
+        L->wq = ggml_new_tensor_2d(c, wt, dim, q_dim);
+        L->wk = ggml_new_tensor_2d(c, wt, dim, kv_dim);
+        L->wv = ggml_new_tensor_2d(c, wt, dim, kv_dim);
+        L->wo = ggml_new_tensor_2d(c, wt, q_dim, dim);
+        L->gate = ggml_new_tensor_2d(c, wt, dim, inter);
+        L->up = ggml_new_tensor_2d(c, wt, dim, inter);
+        L->down = ggml_new_tensor_2d(c, wt, inter, dim);
         L->q_norm = ggml_new_tensor_1d(c, GGML_TYPE_F32, hd);
         L->k_norm = ggml_new_tensor_1d(c, GGML_TYPE_F32, hd);
         L->in_norm = ggml_new_tensor_1d(c, GGML_TYPE_F32, dim);
@@ -271,10 +305,16 @@ int qwen_ggml_decoder_init(qwen_ctx_t *ctx) {
     for (int i = 0; i < cfg->dec_layers && !bad; i++) {
         qwen_dec_layer_t *l = &dec->layers[i];
         gdec_layer_t *L = &g->layers[i];
-        bad |= upload_bf16(L->wq, l->wq_weight_bf16) | upload_bf16(L->wk, l->wk_weight_bf16) |
-               upload_bf16(L->wv, l->wv_weight_bf16) | upload_bf16(L->wo, l->wo_weight_bf16) |
-               upload_bf16(L->gate, l->gate_weight_bf16) | upload_bf16(L->up, l->up_weight_bf16) |
-               upload_bf16(L->down, l->down_weight_bf16);
+        if (q8)
+            bad |= upload_q8(L->wq, &l->wq_q8, 0, 1) | upload_q8(L->wk, &l->wk_q8, 0, 1) |
+                   upload_q8(L->wv, &l->wv_q8, 0, 1) | upload_q8(L->wo, &l->wo_q8, 0, 1) |
+                   upload_q8(L->gate, &l->gate_up_q8, 0, 2) | upload_q8(L->up, &l->gate_up_q8, 1, 2) |
+                   upload_q8(L->down, &l->down_q8, 0, 1);
+        else
+            bad |= upload_bf16(L->wq, l->wq_weight_bf16) | upload_bf16(L->wk, l->wk_weight_bf16) |
+                   upload_bf16(L->wv, l->wv_weight_bf16) | upload_bf16(L->wo, l->wo_weight_bf16) |
+                   upload_bf16(L->gate, l->gate_weight_bf16) | upload_bf16(L->up, l->up_weight_bf16) |
+                   upload_bf16(L->down, l->down_weight_bf16);
         ggml_backend_tensor_set(L->q_norm, l->q_norm_weight, 0, (size_t)hd * sizeof(float));
         ggml_backend_tensor_set(L->k_norm, l->k_norm_weight, 0, (size_t)hd * sizeof(float));
         ggml_backend_tensor_set(L->in_norm, l->input_norm, 0, (size_t)dim * sizeof(float));

@@ -33,6 +33,35 @@ committed only once two steps decoded it the same, and the first chunks are not
 committed at all. A pause commits everything at once. Word end times come from segment timestamps interpolated per character, so the
 latencies are approximate.
 
+### Int8 Models (`quickasr quantize`)
+
+Same streams and machine, CPU, 2 s chunks, 180 s each. Peak RSS includes mapped pages.
+
+| Model | Format | err zh / en | CPU s per s of audio (zh / en) | shown p50 zh / en | Peak RSS |
+|---|---|---|---|---|---|
+| 0.6B | bf16 | 2.68% / 2.48% | 0.73 / 0.92 | 1.33 / 1.57 | 3.0 GB |
+| 0.6B | int8 | 2.46% / 2.48% | 0.64 / 0.80 | 1.33 / 1.55 | 2.3 GB |
+| 1.7B | bf16 | 1.12% / 2.48% | 1.76 / 2.10 | 2.00 / 2.30 | 7.0 GB |
+| 1.7B | int8 | 1.12% / 2.48% | 1.49 / 1.80 | 1.88 / 2.15 | 4.5 GB |
+
+The model files are 1.18 GB (0.6B) and 2.84 GB (1.7B). The output layer stays bf16; an
+int8 one was 2-4% faster but flips near-tied tokens. On an x86-64 VM (AVX2), 0.6B int8
+took as long as bf16 on 180 s of offline audio and peaked 0.65 GB lower (2.97 vs 3.6 GB).
+The quantized file is byte-identical whether it is written on ARM or x86-64.
+
+With `--device gpu` (Metal, same streams, real time) the int8 decoder runs as ggml Q8_0:
+
+| Model | Format | err zh / en | busy zh / en | shown p50 zh / en | Peak RSS |
+|---|---|---|---|---|---|
+| 0.6B | bf16 | 2.68% / 2.48% | 15% / 18% | 1.09 / 1.31 | 4.2 GB |
+| 0.6B | int8 | 2.68% / 2.48% | 16% / 17% | 1.08 / 1.25 | 3.1 GB |
+| 1.7B | bf16 | 1.12% / 1.81% | 24% / 30% | 1.24 / 1.42 | 7.6 / 8.4 GB |
+| 1.7B | int8 | 1.12% / 1.81% | 23% / 28% | 1.22 / 1.38 | 6.8 GB |
+
+The GPU is as fast either way; int8 saves the f16 copy of the decoder weights. On 66
+Japanese conversation clips (bandad, 1.7B, 4 s chunks) the character error rate was
+11.1% (bf16) and 11.1% (int8) on the CPU, 11.3% and 10.9% on the GPU.
+
 ## Offline Mode (Full + Segmented)
 
 | Setup | Audio | 0.6B CPU | 0.6B GPU | 1.7B CPU | 1.7B GPU |

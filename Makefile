@@ -11,7 +11,7 @@ LDFLAGS = -lm -lpthread
 UNAME_S := $(shell uname -s)
 
 # Source files
-SRCS = qwen_asr.c qwen_asr_kernels.c qwen_asr_kernels_generic.c qwen_asr_kernels_neon.c qwen_asr_kernels_avx.c qwen_asr_audio.c qwen_asr_encoder.c qwen_asr_decoder.c qwen_asr_tokenizer.c qwen_asr_safetensors.c qwen_asr_ggml.c
+SRCS = qwen_asr.c qwen_asr_kernels.c qwen_asr_kernels_generic.c qwen_asr_kernels_neon.c qwen_asr_kernels_avx.c qwen_asr_audio.c qwen_asr_encoder.c qwen_asr_decoder.c qwen_asr_tokenizer.c qwen_asr_safetensors.c qwen_asr_quantize.c qwen_asr_ggml.c
 OBJS = $(SRCS:.c=.o)
 MAIN = main.c
 ifeq ($(OS),Windows_NT)

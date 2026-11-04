@@ -122,6 +122,25 @@ Notes:
 - Without a `make gpu` build, `--device gpu` prints a notice and runs on the CPU.
 - Vulkan (Linux, Windows) has not been benchmarked yet.
 
+## Int8 Models (`quickasr quantize`)
+
+```bash
+./quickasr quantize qwen3-asr-0.6b qwen3-asr-0.6b-q8
+./quickasr -d qwen3-asr-0.6b-q8 -i audio.wav --stream
+```
+
+This writes a new model directory; the source model is left as it is. Any model
+quickasr can read works as a source, fine-tunes included, in F32 or BF16. An int8 model is
+detected from its weights, so it needs no option at run time.
+
+The decoder's weights are int8, used straight from the mapped file, so a process starts
+sooner and uses less memory; [performance.md](performance.md) has the numbers. The
+encoder and the token embeddings, which are also the output layer, keep their precision.
+Text can differ slightly from the source model.
+
+On a GPU device (`--device`) the int8 decoder weights are uploaded as ggml Q8_0, so they
+also take about half the GPU memory; the encoder and the token embeddings stay f16 there.
+
 ## Language (`--language`)
 
 ```bash

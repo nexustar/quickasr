@@ -12,6 +12,9 @@ void qwen_bf16_matvec_fused_generic(float *y, const float *x, const uint16_t *W_
 void qwen_argmax_bf16_range_generic(const float *x, const uint16_t *W_bf16,
                                     int in_dim, int start, int end,
                                     int *best_out, float *best_val_out);
+/* y[o] = sum_b dot(wq[o, b], xq[b]) * wd[o, b] * xd[b] over in_dim/32 blocks */
+void qwen_q8_matvec_generic(float *y, const int8_t *xq, const float *xd,
+                            const int8_t *wq, const float *wd, int in_dim, int out_dim);
 float qwen_dot_f32_generic(const float *a, const float *b, int n);
 void qwen_vec_scale_inplace_generic(float *dst, float scale, int n);
 void qwen_vec_axpy_inplace_generic(float *dst, const float *src, float alpha, int n);
@@ -27,7 +30,10 @@ float qwen_dot_f32_neon(const float *a, const float *b, int n);
 void qwen_vec_scale_inplace_neon(float *dst, float scale, int n);
 void qwen_vec_axpy_inplace_neon(float *dst, const float *src, float alpha, int n);
 void qwen_vec_scale_add_neon(float *dst, const float *src, float correction, int n);
+void qwen_q8_matvec_neon(float *y, const int8_t *xq, const float *xd,
+                         const int8_t *wq, const float *wd, int in_dim, int out_dim);
 
+#define qwen_q8_matvec_impl qwen_q8_matvec_neon
 #define qwen_bf16_matvec_fused_impl qwen_bf16_matvec_fused_neon
 #define qwen_argmax_bf16_range_impl qwen_argmax_bf16_range_neon
 #define qwen_dot_f32_impl qwen_dot_f32_neon
@@ -46,6 +52,10 @@ void qwen_vec_scale_inplace_avx(float *dst, float scale, int n);
 void qwen_vec_axpy_inplace_avx(float *dst, const float *src, float alpha, int n);
 void qwen_vec_scale_add_avx(float *dst, const float *src, float correction, int n);
 
+void qwen_q8_matvec_avx(float *y, const int8_t *xq, const float *xd,
+                        const int8_t *wq, const float *wd, int in_dim, int out_dim);
+
+#define qwen_q8_matvec_impl qwen_q8_matvec_avx
 #define qwen_bf16_matvec_fused_impl qwen_bf16_matvec_fused_avx
 #define qwen_argmax_bf16_range_impl qwen_argmax_bf16_range_avx
 #define qwen_dot_f32_impl qwen_dot_f32_avx
@@ -54,6 +64,7 @@ void qwen_vec_scale_add_avx(float *dst, const float *src, float correction, int 
 #define qwen_vec_scale_add_impl qwen_vec_scale_add_avx
 
 #else
+#define qwen_q8_matvec_impl qwen_q8_matvec_generic
 #define qwen_bf16_matvec_fused_impl qwen_bf16_matvec_fused_generic
 #define qwen_argmax_bf16_range_impl qwen_argmax_bf16_range_generic
 #define qwen_dot_f32_impl qwen_dot_f32_generic

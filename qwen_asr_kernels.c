@@ -796,6 +796,182 @@ void qwen_matmul_t_bf16(float *C, const float *A, const uint16_t *B_bf16,
 }
 
 /* ========================================================================
+ * Q8 (int8, 32-wide blocks) weights
+ * ======================================================================== */
+
+/* Quantize n floats (n a multiple of 32): q = round(v / d), d = max|v| / 127. */
+static void q8_quantize_f32(int8_t *q, float *d, const float *v, int n) {
+    for (int b = 0; b < n / QWEN_Q8_BLOCK; b++) {
+        const float *vb = v + b * QWEN_Q8_BLOCK;
+        float amax = 0.0f;
+        for (int j = 0; j < QWEN_Q8_BLOCK; j++) {
+            float a = fabsf(vb[j]);
+            if (a > amax) amax = a;
+        }
+        float scale = amax / 127.0f;
+        float inv = scale > 0.0f ? 1.0f / scale : 0.0f;
+        d[b] = scale;
+        for (int j = 0; j < QWEN_Q8_BLOCK; j++)
+            q[b * QWEN_Q8_BLOCK + j] = (int8_t)lrintf(vb[j] * inv);
+    }
+}
+
+typedef struct {
+    int8_t *qs;
+    float *d;
+    const float *src;
+    int rows;
+    int cols;
+} q8_convert_task_t;
+
+static void q8_convert_worker(int tid, int n_threads, void *arg) {
+    q8_convert_task_t *t = (q8_convert_task_t *)arg;
+    int chunk = (t->rows + n_threads - 1) / n_threads;
+    int start = tid * chunk;
+    int end = start + chunk < t->rows ? start + chunk : t->rows;
+    for (int r = start; r < end; r++)
+        q8_quantize_f32(t->qs + (size_t)r * t->cols,
+                        t->d + (size_t)r * (t->cols / QWEN_Q8_BLOCK),
+                        t->src + (size_t)r * t->cols, t->cols);
+}
+
+void qwen_q8_from_f32(int8_t *qs, float *d, const float *src, int rows, int cols) {
+    q8_convert_task_t task = { qs, d, src, rows, cols };
+    if (tp.n_threads <= 1) q8_convert_worker(0, 1, &task);
+    else parallel_for(q8_convert_worker, &task);
+}
+
+/* Activation quantized once per matvec call, shared by all threads. */
+static int8_t *q8_act_q = NULL;
+static float *q8_act_d = NULL;
+static int q8_act_cap = 0;
+
+static int q8_quantize_act(const float *x, int n) {
+    if (n > q8_act_cap) {
+        free(q8_act_q); free(q8_act_d);
+        q8_act_q = (int8_t *)malloc((size_t)n);
+        q8_act_d = (float *)malloc((size_t)(n / QWEN_Q8_BLOCK) * sizeof(float));
+        q8_act_cap = (q8_act_q && q8_act_d) ? n : 0;
+        if (!q8_act_cap) return -1;
+    }
+    q8_quantize_f32(q8_act_q, q8_act_d, x, n);
+    return 0;
+}
+
+typedef struct {
+    float *y[3];
+    const qwen_q8_t *W[3];
+    int rows[3];
+    int n_seg;
+    int total_rows;
+    int in_dim;
+} q8_matvec_task_t;
+
+/* Rows of up to 3 matrices (Q/K/V) are treated as one range split across threads. */
+static void q8_matvec_worker(int tid, int n_threads, void *arg) {
+    q8_matvec_task_t *t = (q8_matvec_task_t *)arg;
+    int chunk = (t->total_rows + n_threads - 1) / n_threads;
+    int start = tid * chunk;
+    int end = start + chunk < t->total_rows ? start + chunk : t->total_rows;
+    int nb = t->in_dim / QWEN_Q8_BLOCK;
+    int base = 0;
+    for (int s = 0; s < t->n_seg && start < end; s++) {
+        int seg_end = base + t->rows[s];
+        if (start < seg_end) {
+            int a = start - base;
+            int e = (end < seg_end ? end : seg_end) - base;
+            qwen_q8_matvec_impl(t->y[s] + a, q8_act_q, q8_act_d,
+                                t->W[s]->qs + (size_t)a * t->in_dim,
+                                t->W[s]->d + (size_t)a * nb, t->in_dim, e - a);
+            start = seg_end < end ? seg_end : end;
+        }
+        base = seg_end;
+    }
+}
+
+static void q8_matvec_run(q8_matvec_task_t *task) {
+    if (tp.n_threads <= 1) q8_matvec_worker(0, 1, task);
+    else parallel_for(q8_matvec_worker, task);
+}
+
+typedef struct {
+    float *dst;
+    const qwen_q8_t *W;
+} q8_dequant_task_t;
+
+/* restrict matters: int8_t is a char type and may alias the float output,
+ * which otherwise keeps the compiler from vectorizing the inner loop. */
+static void q8_dequant_rows(float *restrict dst, const int8_t *restrict qs,
+                            const float *restrict d, size_t nb) {
+    for (size_t b = 0; b < nb; b++) {
+        float s = d[b];
+        for (int j = 0; j < QWEN_Q8_BLOCK; j++)
+            dst[b * QWEN_Q8_BLOCK + j] = (float)qs[b * QWEN_Q8_BLOCK + j] * s;
+    }
+}
+
+static void q8_dequant_worker(int tid, int n_threads, void *arg) {
+    q8_dequant_task_t *t = (q8_dequant_task_t *)arg;
+    int rows = t->W->rows, cols = t->W->cols;
+    int chunk = (rows + n_threads - 1) / n_threads;
+    int start = tid * chunk;
+    int end = start + chunk < rows ? start + chunk : rows;
+    if (start >= end) return;
+    size_t nbr = (size_t)(cols / QWEN_Q8_BLOCK);
+    q8_dequant_rows(t->dst + (size_t)start * cols, t->W->qs + (size_t)start * cols,
+                    t->W->d + (size_t)start * nbr, (size_t)(end - start) * nbr);
+}
+
+static void q8_to_f32_buf(float *dst, const qwen_q8_t *W) {
+    q8_dequant_task_t task = { dst, W };
+    if (tp.n_threads <= 1) q8_dequant_worker(0, 1, &task);
+    else parallel_for(q8_dequant_worker, &task);
+}
+
+void qwen_linear_nobias_q8(float *y, const float *x, const qwen_q8_t *W,
+                           int seq_len, int in_dim, int out_dim) {
+    if (seq_len == 1) {
+        if (q8_quantize_act(x, in_dim) != 0) return;
+        q8_matvec_task_t task = { .y = { y }, .W = { W }, .rows = { out_dim },
+                                  .n_seg = 1, .total_rows = out_dim, .in_dim = in_dim };
+        q8_matvec_run(&task);
+        return;
+    }
+    float *W_f32 = bf16_get_scratch((size_t)out_dim * in_dim);
+    if (!W_f32) return;
+    q8_to_f32_buf(W_f32, W);
+    qwen_linear_nobias(y, x, W_f32, seq_len, in_dim, out_dim);
+}
+
+void qwen_linear_nobias_q8_qkv(float *q, float *k, float *v, const float *x,
+                               const qwen_q8_t *Wq, const qwen_q8_t *Wk,
+                               const qwen_q8_t *Wv,
+                               int in_dim, int q_dim, int kv_dim) {
+    if (q8_quantize_act(x, in_dim) != 0) return;
+    q8_matvec_task_t task = { .y = { q, k, v }, .W = { Wq, Wk, Wv },
+                              .rows = { q_dim, kv_dim, kv_dim }, .n_seg = 3,
+                              .total_rows = q_dim + 2 * kv_dim, .in_dim = in_dim };
+    q8_matvec_run(&task);
+}
+
+/* The batched decoder path: nx independent activations, row by row. */
+void qwen_matvec_q8_multi(float *y, int ldy, const float *x, int ldx, const qwen_q8_t *W,
+                          int in_dim, int out_dim, int nx) {
+    for (int i = 0; i < nx; i++)
+        qwen_linear_nobias_q8(y + (size_t)i * ldy, x + (size_t)i * ldx, W, 1, in_dim, out_dim);
+}
+
+void qwen_matvec_q8_qkv_multi(float *q, float *k, float *v, const float *x, int ldx,
+                              const qwen_q8_t *Wq, const qwen_q8_t *Wk, const qwen_q8_t *Wv,
+                              int in_dim, int q_dim, int kv_dim, int nx) {
+    for (int i = 0; i < nx; i++)
+        qwen_linear_nobias_q8_qkv(q + (size_t)i * q_dim, k + (size_t)i * kv_dim,
+                                  v + (size_t)i * kv_dim, x + (size_t)i * ldx,
+                                  Wq, Wk, Wv, in_dim, q_dim, kv_dim);
+}
+
+
+/* ========================================================================
  * 2D Convolution (im2col + BLAS sgemm)
  * ======================================================================== */
 

@@ -62,6 +62,33 @@ void qwen_matvec_bf16_qkv_multi(float *q, float *k, float *v, const float *x, in
 void qwen_argmax_matvec_bf16_multi(const float *x, int ldx, const uint16_t *W_bf16,
                                    int in_dim, int out_dim, int nx, int *best);
 
+/* Int8 weights, row-major, one f32 scale per 32; pointers into the mapped file. */
+#define QWEN_Q8_BLOCK 32
+
+typedef struct {
+    const int8_t *qs;    /* [rows * cols] */
+    const float *d;      /* [rows * cols / QWEN_Q8_BLOCK] */
+    int rows;
+    int cols;
+} qwen_q8_t;
+
+/* Quantize a f32 [rows, cols] matrix (quickasr quantize). */
+void qwen_q8_from_f32(int8_t *qs, float *d, const float *src, int rows, int cols);
+
+/* seq=1: x is quantized to int8 blocks and dotted with int8 weights;
+ * seq>1: weights are dequantized to f32 and multiplied with BLAS. */
+void qwen_linear_nobias_q8(float *y, const float *x, const qwen_q8_t *W,
+                           int seq_len, int in_dim, int out_dim);
+void qwen_linear_nobias_q8_qkv(float *q, float *k, float *v, const float *x,
+                               const qwen_q8_t *Wq, const qwen_q8_t *Wk,
+                               const qwen_q8_t *Wv,
+                               int in_dim, int q_dim, int kv_dim);
+void qwen_matvec_q8_multi(float *y, int ldy, const float *x, int ldx, const qwen_q8_t *W,
+                          int in_dim, int out_dim, int nx);
+void qwen_matvec_q8_qkv_multi(float *q, float *k, float *v, const float *x, int ldx,
+                              const qwen_q8_t *Wq, const qwen_q8_t *Wk, const qwen_q8_t *Wv,
+                              int in_dim, int q_dim, int kv_dim, int nx);
+
 /* ========================================================================
  * 2D Convolution (for audio encoder conv stem)
  * ======================================================================== */

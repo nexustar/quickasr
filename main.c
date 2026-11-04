@@ -78,7 +78,10 @@ static int parse_past_text_mode(const char *s, int *out_mode) {
 
 static void usage(const char *prog) {
     fprintf(stderr, "quickasr — Qwen3-ASR speech-to-text (pure C)\n\n");
-    fprintf(stderr, "Usage: %s -d <model_dir> (-i <input.wav> | --stdin) [options]\n\n", prog);
+    fprintf(stderr, "Usage: %s -d <model_dir> (-i <input.wav> | --stdin) [options]\n", prog);
+    fprintf(stderr, "       %s quantize <model_dir> <out_dir> [-t <n>] [--silent]\n", prog);
+    fprintf(stderr, "         Write an int8 copy of a model to out_dir: smaller, uses less\n");
+    fprintf(stderr, "         memory. Use it with -d like any model.\n\n");
     fprintf(stderr, "Required:\n");
     fprintf(stderr, "  -d <dir>      Model directory (with *.safetensors, vocab.json or tokenizer.json)\n");
     fprintf(stderr, "  -i <file>     Input WAV file (16-bit PCM, any sample rate)\n");
@@ -125,11 +128,47 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -h            Show this help\n");
 }
 
+/* quickasr quantize <model_dir> <out_dir> [-t <n>] [--silent] */
+static int quantize_main(int argc, char **argv, const char *prog) {
+    const char *dirs[2] = { NULL, NULL };
+    int n_dirs = 0, n_threads = 0, verbosity = 1;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+            n_threads = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--silent") == 0) {
+            verbosity = 0;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            usage(prog);
+            return 0;
+        } else if (argv[i][0] != '-') {
+            if (n_dirs == 2) {
+                fprintf(stderr, "Error: quantize takes two directories, got another: %s\n", argv[i]);
+                return 1;
+            }
+            dirs[n_dirs++] = argv[i];
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            usage(prog);
+            return 1;
+        }
+    }
+    if (n_dirs != 2) {
+        usage(prog);
+        return 1;
+    }
+    qwen_verbose = verbosity;
+    qwen_set_threads(n_threads > 0 ? n_threads : qwen_get_num_cpus());
+    return qwen_quantize_model(dirs[0], dirs[1]) == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     /* Transcripts are UTF-8 */
     SetConsoleOutputCP(CP_UTF8);
 #endif
+    if (argc > 1 && strcmp(argv[1], "quantize") == 0)
+        return quantize_main(argc - 1, argv + 1, argv[0]);
+
     const char *model_dir = NULL;
     const char *input_wav = NULL;
     int verbosity = 1;
