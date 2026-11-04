@@ -177,12 +177,15 @@ Current streaming behavior in `qwen_transcribe_stream()`:
 - Rolled-back tokens from the previous step checked in one decoder pass (draft reuse)
 - Prefix rollback policy for token stability
 - Text is committed, and fed back as prefix, only once two consecutive steps decoded it the same
+- Held text (after the last agreed point) is decoded again each step: the step token limit includes it, and a periodic reset waits for it to be committed
 - Monotonic commit frontier (no retracting already-emitted text)
 
 Debug/env switch:
 - `QWEN_STREAM_NO_ENC_CACHE=1` disables encoder window cache (debug/regression only)
 - `QWEN_GPU_ENC=0` with a GPU `--device` keeps the encoder on the CPU (debug/A-B only)
 - `QWEN_STREAM_NO_AGREE=1` commits without waiting for two steps to agree (debug/A-B only)
+- `QWEN_STREAM_NO_BACKLOG=1` limits a step's tokens by its new audio only, not by the held text it decodes again (debug/A-B only)
+- `QWEN_STREAM_NO_HELD_WAIT=1` lets a periodic reset drop held text instead of waiting for it to be committed (debug/A-B only)
 - `QWEN_STREAM_NO_DRAFT=1` disables reusing the previous step's tokens as a one-pass draft (debug/regression only; output is identical either way)
 
 Important caveat:

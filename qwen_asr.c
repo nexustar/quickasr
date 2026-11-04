@@ -1449,6 +1449,11 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int use_draft = !(no_draft_env && no_draft_env[0] != '\0' && strcmp(no_draft_env, "0") != 0);
     const char *no_agree_env = getenv("QWEN_STREAM_NO_AGREE");
     int use_agree = !(no_agree_env && no_agree_env[0] != '\0' && strcmp(no_agree_env, "0") != 0);
+    const char *no_backlog_env = getenv("QWEN_STREAM_NO_BACKLOG");
+    int use_backlog = !(no_backlog_env && no_backlog_env[0] != '\0' && strcmp(no_backlog_env, "0") != 0);
+    const char *no_held_wait_env = getenv("QWEN_STREAM_NO_HELD_WAIT");
+    int use_held_wait = !(no_held_wait_env && no_held_wait_env[0] != '\0' &&
+                          strcmp(no_held_wait_env, "0") != 0);
     const char *no_cache_env = getenv("QWEN_STREAM_NO_ENC_CACHE");
     int use_enc_cache = 1;
     if (no_cache_env && no_cache_env[0] != '\0' && strcmp(no_cache_env, "0") != 0) {
@@ -1480,6 +1485,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     /* Much longer and the 1.7B model drifts into writing no punctuation. */
     #define QWEN_STREAM_RESET_INTERVAL_SEC 90.0
     #define QWEN_STREAM_RESET_CARRY_TOKENS 24
+    /* A periodic reset would drop held text: while more is held, it waits up
+     * to this many chunks. */
+    #define QWEN_STREAM_RESET_MAX_HELD 8
+    #define QWEN_STREAM_RESET_MAX_WAIT_CHUNKS 4
+    /* A step's token limit covers its held text, not only its new audio. */
+    #define QWEN_STREAM_MAX_STEP_TOKENS 160
     /* A periodic reset keeps this many completed encoder windows, so the
      * carried text keeps the audio it came from; without it the decoder
      * tends to end its turn on every chunk until the next reset. */
@@ -2374,6 +2385,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             double new_sec = (double)(audio_cursor - decoded_cursor) / QWEN_SAMPLE_RATE;
             int need = (int)(QWEN_STREAM_TOKENS_PER_SEC * new_sec + 0.5) + rollback;
             if (need > step_cap) step_cap = need;
+            int backlog = n_raw_tokens - n_prefix_tokens_full;
+            if (use_backlog && backlog > 0) {
+                int with_backlog = backlog + max_new_tokens;
+                if (with_backlog > QWEN_STREAM_MAX_STEP_TOKENS) with_backlog = QWEN_STREAM_MAX_STEP_TOKENS;
+                if (with_backlog > step_cap) step_cap = with_backlog;
+            }
         }
         decoded_cursor = audio_cursor;
 
@@ -2902,6 +2919,10 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                      ctx->past_text_conditioning &&
                      chunk_idx >= unfixed_chunks &&
                      chunk_idx - last_trim_chunk >= reset_interval_chunks);
+                if (periodic_reset && use_held_wait &&
+                    held_text_tokens > QWEN_STREAM_RESET_MAX_HELD &&
+                    chunk_idx - last_trim_chunk < reset_interval_chunks + QWEN_STREAM_RESET_MAX_WAIT_CHUNKS)
+                    periodic_reset = 0;
                 /* Carried text without punctuation keeps the model writing
                  * none (1.7B drifts into it); then carry no text. */
                 int periodic_no_text = 0;
