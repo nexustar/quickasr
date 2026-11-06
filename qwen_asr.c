@@ -1451,6 +1451,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int use_agree = !(no_agree_env && no_agree_env[0] != '\0' && strcmp(no_agree_env, "0") != 0);
     const char *no_backlog_env = getenv("QWEN_STREAM_NO_BACKLOG");
     int use_backlog = !(no_backlog_env && no_backlog_env[0] != '\0' && strcmp(no_backlog_env, "0") != 0);
+    const char *no_stall_keep_env = getenv("QWEN_STREAM_NO_STALL_KEEP");
+    int use_stall_keep = !(no_stall_keep_env && no_stall_keep_env[0] != '\0' &&
+                           strcmp(no_stall_keep_env, "0") != 0);
     const char *no_held_wait_env = getenv("QWEN_STREAM_NO_HELD_WAIT");
     int use_held_wait = !(no_held_wait_env && no_held_wait_env[0] != '\0' &&
                           strcmp(no_held_wait_env, "0") != 0);
@@ -1591,6 +1594,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int emitted_text_cap = 8192;
     int stagnant_chunks = 0;
     int quiet_chunks = 0;
+    int64_t step_from = 0;          /* audio_cursor before the current step */
+    int64_t stall_from = 0;         /* start of the first step of the current stall */
     /* Loop break while decoding. The 1.7B model gets past a loop with its
      * runner-up token; the 0.6B model only varies the loop, so its step
      * ends instead. Five copies for 0.6B spare a spoken "はいはいはいはい". */
@@ -1686,7 +1691,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      *   reset            text kept         windows kept   audio decoded again
      *   periodic trim    last 24 tokens    1              (with the text)
      *     no punctuation language header  1              yes, aligned
-     *   stall            language header   none           partial window, aligned
+     *   stall            language header   the stalled    yes, aligned
      *   pause            none              none           unemitted part, aligned;
      *                                                     emitted part silenced
      *   loop, soft       language header   1              yes, aligned after a wait
@@ -2392,6 +2397,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 if (with_backlog > step_cap) step_cap = with_backlog;
             }
         }
+        step_from = decoded_cursor;
         decoded_cursor = audio_cursor;
 
         /* Collect ALL generated tokens (including language, <asr_text>, etc.) */
@@ -2541,10 +2547,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
          * without past text there is no prefix to blame. */
         if (!chunk_no_speech) {
             if (!is_final && ctx->past_text_conditioning &&
-                n_raw_new > 0 && n_raw_new <= n_raw_tokens)
+                n_raw_new > 0 && n_raw_new <= n_raw_tokens) {
+                if (quiet_chunks == 0) stall_from = step_from;
                 quiet_chunks++;
-            else
+            } else {
                 quiet_chunks = 0;
+            }
         }
         int quiet_reset = (warmed_up && quiet_chunks >= QWEN_STREAM_QUIET_RESET_CHUNKS);
         if (n_raw_new > raw_tokens_cap) {
@@ -2985,7 +2993,14 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     /* Keep only the language header the model produced, so
                      * the restart does not re-detect (and switch) language. */
                     STREAM_RESET_TEXT(text_start);
-                    STREAM_RESET_AUDIO(-1, full_end);
+                    /* Keep the windows the stall covered: the decoder ran
+                     * on them without writing, so decode them again. */
+                    int keep_ = 0;
+                    for (int w_ = n_enc_cache - 1; use_stall_keep && w_ >= enc_cache_start &&
+                         enc_cache[w_].start_sample + enc_window_samples > stall_from; w_--)
+                        keep_++;
+                    if (keep_ > 0) STREAM_RESET_AUDIO(keep_, 0);
+                    else STREAM_RESET_AUDIO(-1, full_end);
                     quiet_chunks = 0;
                     STREAM_REALIGN(0);
                     STREAM_RESET_DONE();
