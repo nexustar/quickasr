@@ -1491,7 +1491,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     /* A periodic reset would drop held text: while more is held, it waits up
      * to this many chunks. */
     #define QWEN_STREAM_RESET_MAX_HELD 8
-    #define QWEN_STREAM_RESET_MAX_WAIT_CHUNKS 4
+    #define QWEN_STREAM_RESET_MAX_WAIT_CHUNKS 12
     /* A step's token limit covers its held text, not only its new audio. */
     #define QWEN_STREAM_MAX_STEP_TOKENS 160
     /* A periodic reset keeps this many completed encoder windows, so the
