@@ -183,6 +183,7 @@ Current streaming behavior in `qwen_transcribe_stream()`:
 - Text is committed, and fed back as prefix, only once two consecutive steps decoded it the same
 - Held text (after the last agreed point) is decoded again each step: the step token limit includes it, and a periodic reset waits for it to be committed
 - A stall reset (steps with speech but no new text) drops the text prefix and decodes the stalled audio again from the cached encoder windows
+- Chunks over 2 s: a stall is declared after 8 s instead of 4 chunks, and the first 4 s instead of 2 chunks are left unfixed (2 s and shorter chunks are unchanged)
 - Monotonic commit frontier (no retracting already-emitted text)
 
 Debug/env switch:

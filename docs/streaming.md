@@ -84,9 +84,10 @@ delay before a word is shown (180 s of Chinese speech):
 
 Use 1 s when there is headroom (the GPU, or 0.6B on a fast CPU); raise it on slower
 hardware once the busy share approaches 100% and text starts to lag behind the audio.
-Prefer raising `--stream-chunk-sec` over lowering `--enc-window-sec`: the chunk size is
-a scheduling knob with no quality cost, while a smaller encoder window also shrinks the
-model's attention context.
+Prefer raising `--stream-chunk-sec` over lowering `--enc-window-sec`, which also shrinks
+the model's attention context. Larger chunks cost some accuracy on long natural speech:
+on 10 TED talks (1.7B, GPU) the word error rate was 2.06% with 2 s chunks and 2.21% with
+4 s chunks.
 
 ## Monitor Mode (`--monitor`)
 

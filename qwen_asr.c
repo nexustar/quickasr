@@ -1524,6 +1524,19 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     #define QWEN_STREAM_EP_MIN_SPEECH_RMS 0.001f
     #define QWEN_STREAM_EP_SEC 1.0
 
+    /* Chunks over 2 s: a stall (or no progress) is declared after 8 s rather
+     * than 4 chunks, and the first 4 s rather than 2 chunks stay unfixed. */
+    int quiet_reset_chunks = QWEN_STREAM_QUIET_RESET_CHUNKS;
+    int stale_chunks = QWEN_STREAM_STALE_CHUNKS;
+    {
+        int s = (int)(8.0 / ctx->stream_chunk_sec + 0.5);
+        if (s < 2) s = 2;
+        if (s < quiet_reset_chunks) quiet_reset_chunks = s;
+        if (s < stale_chunks) stale_chunks = s;
+        int u = (int)(4.0 / ctx->stream_chunk_sec + 0.5);
+        if (u < 1) u = 1;
+        if (u < unfixed_chunks) unfixed_chunks = u;
+    }
     if (qwen_verbose >= 2) {
         if (live)
             fprintf(stderr,
@@ -2554,7 +2567,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 quiet_chunks = 0;
             }
         }
-        int quiet_reset = (warmed_up && quiet_chunks >= QWEN_STREAM_QUIET_RESET_CHUNKS);
+        int quiet_reset = (warmed_up && quiet_chunks >= quiet_reset_chunks);
         if (n_raw_new > raw_tokens_cap) {
             while (n_raw_new > raw_tokens_cap) raw_tokens_cap *= 2;
             int *tmp_raw = (int *)realloc(raw_tokens, (size_t)raw_tokens_cap * sizeof(int));
@@ -2676,7 +2689,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 n_generated >= step_cap) {
                 recovery_reset = 1;
             }
-            if (stagnant_chunks >= QWEN_STREAM_STALE_CHUNKS) {
+            if (stagnant_chunks >= stale_chunks) {
                 recovery_reset = 1;
             }
             if (dropped_repeat_tokens >= 8) {
@@ -2695,7 +2708,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 int w = 0;
                 if (force_recovery)
                     w = snprintf(recovery_why, sizeof(recovery_why), "loop while decoding");
-                else if (stagnant_chunks >= QWEN_STREAM_STALE_CHUNKS)
+                else if (stagnant_chunks >= stale_chunks)
                     w = snprintf(recovery_why, sizeof(recovery_why), "no progress");
                 else if (dropped_repeat_tokens >= 8)
                     w = snprintf(recovery_why, sizeof(recovery_why), "repeated tokens");
@@ -3006,7 +3019,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     STREAM_RESET_DONE();
                     if (qwen_verbose >= 2) fprintf(stderr, "  Stall reset applied\n");
                     STREAM_EVENT("stall reset: %d steps without new text",
-                                 QWEN_STREAM_QUIET_RESET_CHUNKS);
+                                 quiet_reset_chunks);
                 }
             }
             if (recovery_reset) {
