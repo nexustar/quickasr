@@ -642,6 +642,9 @@ static int find_split_point(const float *samples, int n_samples,
  * Transcribe a single audio segment. Returns malloc'd text or NULL.
  * The tokenizer is passed in so we only load it once.
  */
+static int stream_tail_repeat_blocks(const int *tokens, int n_tokens, int max_period,
+                                     int *out_period);
+
 static char *transcribe_segment(qwen_ctx_t *ctx, const float *samples,
                                 int n_samples, qwen_tokenizer_t *tokenizer,
                                 const int *past_tokens, int n_past_tokens,
@@ -771,8 +774,17 @@ static char *transcribe_segment(qwen_ctx_t *ctx, const float *samples,
 
     /* ---- Autoregressive decode ---- */
     t0 = get_time_ms();
-    int max_tokens = 2048;
+    /* Room for 20 tokens a second, far above speech; a loop stops there. */
+    int max_tokens = 64 + (int)(20.0 * n_samples / QWEN_SAMPLE_RATE);
     int n_generated = 0;
+    /* A token that would repeat the tail block for the Nth time (2N times for
+     * a one-token block) is a loop, as in streaming: the first time the
+     * runner-up token is taken instead, the second time (within 64 tokens) the
+     * segment ends. */
+    int loop_reps = cfg->dec_hidden > 1024 ? 4 : 5;
+    int loop_breaks = 0, last_break = 0;
+    int *gen = (int *)malloc((size_t)max_tokens * sizeof(int));
+    int n_gen = 0;
     /* If language is forced, <asr_text> is already part of prompt suffix. */
     int past_asr_text = (ctx->n_force_prompt_tokens > 0 || n_past_tokens > 0) ? 1 : 0;
 
@@ -791,6 +803,23 @@ static char *transcribe_segment(qwen_ctx_t *ctx, const float *samples,
         if (token == QWEN_TOKEN_ASR_TEXT) {
             past_asr_text = 1;
         } else if (past_asr_text) {
+            if (gen && n_gen > 0) {
+                int lp = 0;
+                gen[n_gen] = token;
+                int lr = stream_tail_repeat_blocks(gen, n_gen + 1, 16, &lp);
+                if (lp > 0 && lr >= (lp == 1 ? 2 * loop_reps : loop_reps)) {
+                    if (n_gen - last_break > 64) loop_breaks = 0;
+                    last_break = n_gen;
+                    if (loop_breaks++ > 0) {
+                        if (qwen_verbose >= 2) fprintf(stderr, "  Loop: segment ended\n");
+                        break;
+                    }
+                    token = qwen_decoder_next_excluding(ctx, token);
+                    if (qwen_verbose >= 2) fprintf(stderr, "  Loop: runner-up token taken\n");
+                    if (token == QWEN_TOKEN_ENDOFTEXT || token == QWEN_TOKEN_IM_END) break;
+                }
+            }
+            if (gen) gen[n_gen++] = token;
             /* Decode and emit this text token */
             const char *piece = qwen_tokenizer_decode(tokenizer, token);
             size_t piece_len = strlen(piece);
@@ -820,6 +849,7 @@ static char *transcribe_segment(qwen_ctx_t *ctx, const float *samples,
                 n_generated > 0 ? decode_ms / n_generated : 0);
 
     free(tmp_embed);
+    free(gen);
 
     /* Trim whitespace */
     size_t rlen = strlen(text);
