@@ -118,7 +118,7 @@ From `qwen_load()` and CLI:
 - `bench/`
   - real-time streaming latency benchmark (public AISHELL / LibriSpeech test sets, downloaded)
 - `download_model.sh`
-  - interactive small/large model downloader
+  - interactive small/large model downloader (`--q8`: int8 copies from the `quickasr` HF org)
 
 ## Build + Run
 

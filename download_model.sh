@@ -5,18 +5,21 @@
 #   ./download_model.sh
 #   ./download_model.sh --model small
 #   ./download_model.sh --model large --dir my-model-dir
+#   ./download_model.sh --model small --q8
 #
 # Options:
 #   --model small|large   Choose 0.6B (small) or 1.7B (large)
+#   --q8                  Int8 copy (quickasr/Qwen3-ASR-*-q8, made by `quickasr quantize`)
 #   --dir DIR             Override output directory
 
 set -e
 
 MODEL_CHOICE=""
 MODEL_DIR=""
+Q8=0
 
 usage() {
-    echo "Usage: $0 [--model small|large] [--dir DIR]"
+    echo "Usage: $0 [--model small|large] [--q8] [--dir DIR]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -24,6 +27,10 @@ while [[ $# -gt 0 ]]; do
         --model)
             MODEL_CHOICE="$2"
             shift 2
+            ;;
+        --q8)
+            Q8=1
+            shift
             ;;
         --dir)
             MODEL_DIR="$2"
@@ -45,9 +52,11 @@ choose_model_interactive() {
     echo "Select model size to download:"
     echo "  1) small (Qwen3-ASR-0.6B)"
     echo "  2) large (Qwen3-ASR-1.7B)"
+    echo "  3) small int8 (Qwen3-ASR-0.6B-q8)"
+    echo "  4) large int8 (Qwen3-ASR-1.7B-q8)"
     echo ""
     while true; do
-        read -r -p "Enter choice [1/2]: " ans
+        read -r -p "Enter choice [1-4]: " ans
         case "$ans" in
             1|small|Small|SMALL)
                 MODEL_CHOICE="small"
@@ -57,8 +66,16 @@ choose_model_interactive() {
                 MODEL_CHOICE="large"
                 return
                 ;;
+            3)
+                MODEL_CHOICE="small"; Q8=1
+                return
+                ;;
+            4)
+                MODEL_CHOICE="large"; Q8=1
+                return
+                ;;
             *)
-                echo "Please choose 1 (small) or 2 (large)."
+                echo "Please choose 1, 2, 3 or 4."
                 ;;
         esac
     done
@@ -67,6 +84,7 @@ choose_model_interactive() {
 if [[ -z "$MODEL_CHOICE" ]]; then
     choose_model_interactive
 fi
+USER_DIR="$MODEL_DIR"
 
 case "$MODEL_CHOICE" in
     small|0.6b|0.6B)
@@ -99,6 +117,22 @@ case "$MODEL_CHOICE" in
         exit 1
         ;;
 esac
+
+# Int8 copies (quickasr only): one model.safetensors whatever the size
+if [[ "$Q8" == 1 ]]; then
+    case "$MODEL_ID" in
+        Qwen/Qwen3-ASR-0.6B) MODEL_ID="quickasr/Qwen3-ASR-0.6B-q8"; Q8_DIR="qwen3-asr-0.6b-q8" ;;
+        Qwen/Qwen3-ASR-1.7B) MODEL_ID="quickasr/Qwen3-ASR-1.7B-q8"; Q8_DIR="qwen3-asr-1.7b-q8" ;;
+    esac
+    if [[ -z "$USER_DIR" ]]; then MODEL_DIR="$Q8_DIR"; fi
+    FILES=(
+        "config.json"
+        "generation_config.json"
+        "model.safetensors"
+        "vocab.json"
+        "merges.txt"
+    )
+fi
 
 echo "Downloading ${MODEL_ID} to ${MODEL_DIR}/"
 echo ""

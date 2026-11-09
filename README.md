@@ -43,7 +43,10 @@ Then download a model (interactive: small = 0.6B, large = 1.7B):
 ./download_model.sh
 ```
 
-The 1.7B model is more accurate and about twice as slow as 0.6B.
+The 1.7B model is more accurate and about twice as slow as 0.6B. Int8 copies
+([0.6B](https://huggingface.co/quickasr/Qwen3-ASR-0.6B-q8),
+[1.7B](https://huggingface.co/quickasr/Qwen3-ASR-1.7B-q8); `--q8` or choices 3/4) use less
+memory.
 
 ## Usage
 

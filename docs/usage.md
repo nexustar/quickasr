@@ -141,6 +141,15 @@ Text can differ slightly from the source model.
 On a GPU device (`--device`) the int8 decoder weights are uploaded as ggml Q8_0, so they
 also take about half the GPU memory; the encoder and the token embeddings stay f16 there.
 
+Int8 copies of the official models are published as
+[quickasr/Qwen3-ASR-0.6B-q8](https://huggingface.co/quickasr/Qwen3-ASR-0.6B-q8) and
+[quickasr/Qwen3-ASR-1.7B-q8](https://huggingface.co/quickasr/Qwen3-ASR-1.7B-q8), the same
+files `quickasr quantize` writes:
+
+```bash
+./download_model.sh --model small --q8     # into qwen3-asr-0.6b-q8/
+```
+
 ## Language (`--language`)
 
 ```bash
