@@ -19,7 +19,13 @@
 
 /* ========================================================================
  * Read-only file mapping
+ *
+ * The file is read through once before it is mapped: from a cold disk, a
+ * sequential read is several times faster than faulting the mapping's pages
+ * in, and from the page cache it is cheap.
  * ======================================================================== */
+
+#define PREREAD_CHUNK ((size_t)8 << 20)
 
 #ifdef _WIN32
 static void *map_file(const char *path, size_t *out_size) {
@@ -28,6 +34,12 @@ static void *map_file(const char *path, size_t *out_size) {
     if (f == INVALID_HANDLE_VALUE) return NULL;
     LARGE_INTEGER size;
     if (!GetFileSizeEx(f, &size) || size.QuadPart < 8) { CloseHandle(f); return NULL; }
+    char *buf = malloc(PREREAD_CHUNK);
+    if (buf) {
+        DWORD got;
+        while (ReadFile(f, buf, (DWORD)PREREAD_CHUNK, &got, NULL) && got > 0) {}
+        free(buf);
+    }
     HANDLE m = CreateFileMappingA(f, NULL, PAGE_READONLY, 0, 0, NULL);
     CloseHandle(f);
     if (!m) return NULL;
@@ -50,6 +62,11 @@ static void *map_file(const char *path, size_t *out_size) {
     struct stat st;
     if (fstat(fd, &st) < 0 || st.st_size < 8) { close(fd); return NULL; }
     size_t size = (size_t)st.st_size;
+    char *buf = malloc(PREREAD_CHUNK);
+    if (buf) {
+        while (read(fd, buf, PREREAD_CHUNK) > 0) {}
+        free(buf);
+    }
     void *data = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
     if (data == MAP_FAILED) return NULL;
