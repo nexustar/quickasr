@@ -244,6 +244,8 @@ typedef struct {
                                     * is buffered and emit the held-back tail (default 800, 0=off) */
     int stream_pause_reset_ms;     /* live stream: after a pause this long, drop the text prefix and older
                                     * cached audio so the next speech starts clean (default 3000, 0=off) */
+    float stream_speech_gate;      /* stream with a forced language: skip a step whose own "language"
+                                    * prediction is None at least this likely (default 0.5, 0=off) */
     int stream_log;                /* stream: log resets, recoveries and language changes to stderr */
 
     /* Optional prompt/language controls */
@@ -252,6 +254,9 @@ typedef struct {
     int *prompt_tokens;            /* cached token ids for prompt text */
     int n_prompt_tokens;
     int *force_prompt_tokens;      /* cached token ids for "language X" + <asr_text> */
+    int none_lang_token;           /* first token of "None" after "language" (speech gate) */
+    int probe_row;                 /* row of the next prefill whose next-token logits to keep (-1: none) */
+    int probe_ready;               /* the GPU prefill left that row's logits in its logits buffer */
     int n_force_prompt_tokens;
     int prompt_tokens_ready;       /* cache valid flag */
 
@@ -347,6 +352,11 @@ void qwen_decoder_prefill(qwen_ctx_t *ctx, const float *input_embeds, int seq_le
 /* Decoder forward (single token, uses KV cache, returns greedy token) */
 int qwen_decoder_forward(qwen_ctx_t *ctx, const float *input_embed);
 int qwen_decoder_next_excluding(qwen_ctx_t *ctx, int excl);
+/* Next-token distribution at one row of the last prefill (on a GPU decoder, the
+ * row set in ctx->probe_row): probabilities of ids[0..n), and the most likely
+ * token. -1 when not available. */
+int qwen_decoder_prefill_row_probs(qwen_ctx_t *ctx, int row, const int *ids, int n,
+                                   float *probs, int *top);
 
 /* n <= QWEN_MULTI_MAX_X consecutive qwen_decoder_forward steps in one pass over
  * the weights; pred[i] is the token the step for embeds[i] returns. */

@@ -457,6 +457,39 @@ void qwen_decoder_prefill(qwen_ctx_t *ctx, const float *input_embeds, int seq_le
     ctx->kv_cache_len = start_pos + seq_len;
 }
 
+int qwen_decoder_prefill_row_probs(qwen_ctx_t *ctx, int row, const int *ids, int n,
+                                   float *probs, int *top) {
+    const qwen_config_t *cfg = &ctx->config;
+    int dim = cfg->dec_hidden, vocab = cfg->vocab_size;
+    float *xn = NULL;
+    float *logits = (float *)malloc((size_t)vocab * sizeof(float));
+    if (!logits) return -1;
+#ifdef USE_GGML
+    if (ctx->ggml_dec) {
+        /* the prefill was asked for this row (ctx->probe_row) */
+        if (!ctx->probe_ready) { free(logits); return -1; }
+        memcpy(logits, qwen_ggml_logits(ctx, 0), (size_t)vocab * sizeof(float));
+        ctx->probe_ready = 0;
+    } else
+#endif
+    {
+        xn = (float *)malloc((size_t)dim * sizeof(float));
+        if (!xn) { free(logits); return -1; }
+        qwen_rms_norm(xn, ctx->pref_x + (size_t)row * dim, ctx->decoder.norm, 1, dim, cfg->dec_rms_norm_eps);
+        qwen_linear_nobias_bf16(logits, xn, ctx->decoder.tok_embeddings_bf16, 1, dim, vocab);
+    }
+    float mx = logits[0];
+    int best = 0;
+    for (int i = 1; i < vocab; i++) if (logits[i] > mx) { mx = logits[i]; best = i; }
+    double sum = 0;
+    for (int i = 0; i < vocab; i++) sum += exp((double)(logits[i] - mx));
+    for (int j = 0; j < n; j++)
+        probs[j] = (ids[j] >= 0 && ids[j] < vocab) ? (float)(exp((double)(logits[ids[j]] - mx)) / sum) : 0.0f;
+    *top = best;
+    free(xn); free(logits);
+    return 0;
+}
+
 /* ========================================================================
  * Decoder Forward (Single Token Generation)
  * ======================================================================== */

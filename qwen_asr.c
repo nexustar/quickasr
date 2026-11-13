@@ -224,6 +224,7 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
     qwen_ctx_t *ctx = (qwen_ctx_t *)calloc(1, sizeof(qwen_ctx_t));
     if (!ctx) return NULL;
     snprintf(ctx->model_dir, sizeof(ctx->model_dir), "%s", model_dir);
+    ctx->probe_row = -1;
 
     /* Open safetensors (multi-shard) */
     if (qwen_verbose >= 1)
@@ -290,6 +291,7 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
     ctx->stream_unfixed_chunks = 2;
     ctx->stream_idle_flush_ms = 800;
     ctx->stream_pause_reset_ms = 3000;
+    ctx->stream_speech_gate = 0.5f;
     ctx->stream_max_new_tokens = 32;
     ctx->past_text_conditioning = 0;
     ctx->skip_silence = 0;
@@ -596,6 +598,11 @@ static int prepare_prompt_tokens(qwen_ctx_t *ctx, qwen_tokenizer_t *tokenizer) {
         }
         ctx->force_prompt_tokens[n_lang_txt] = QWEN_TOKEN_ASR_TEXT;
         free(lang_txt_tokens);
+
+        int n_none = 0;
+        int *none_tokens = qwen_tokenizer_encode(tokenizer, "language None", &n_none);
+        ctx->none_lang_token = (none_tokens && n_none >= 2) ? none_tokens[1] : -1;
+        free(none_tokens);
     }
 
     ctx->prompt_tokens_ready = 1;
@@ -1475,6 +1482,17 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     if (enc_window_frames < 100) enc_window_frames = 100;
     if (enc_window_frames > 800) enc_window_frames = 800;
     int enc_window_samples = enc_window_frames * QWEN_HOP_LENGTH;
+    /* Speech gate. With a forced language the prompt already says
+     * "language X", so the model cannot answer "language None" and writes
+     * text on noise. Its prediction at that position still says how likely
+     * None was: a step at --speech-gate or above is skipped like a silent
+     * chunk. --debug logs the prediction of every step. */
+    float speech_gate = ctx->stream_speech_gate;
+    int probe_log = qwen_verbose >= 2;
+    const char *no_gate_reset_env = getenv("QWEN_STREAM_NO_GATE_RESET");
+    int gate_reset = !(no_gate_reset_env && no_gate_reset_env[0] != '\0' && strcmp(no_gate_reset_env, "0") != 0);
+    int gated_steps = 0, gate_resets = 0;
+    int gated_run = 0;   /* consecutive gated steps */
     const char *no_draft_env = getenv("QWEN_STREAM_NO_DRAFT");
     int use_draft = !(no_draft_env && no_draft_env[0] != '\0' && strcmp(no_draft_env, "0") != 0);
     const char *no_agree_env = getenv("QWEN_STREAM_NO_AGREE");
@@ -2380,13 +2398,34 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
          * keep the longest unchanged prefill prefix and only prefill delta tokens. */
         ctx->kv_cache_len = reused_prefill;
         int delta_prefill = prefill_len - reused_prefill;
+        int probing = (probe_log || speech_gate > 0) && ctx->n_force_prompt_tokens >= 3 && ctx->none_lang_token >= 0;
+        ctx->probe_row = probing ? suffix_off + SUFFIX_BASE_LEN - reused_prefill : -1;
         if (delta_prefill > 0) {
             qwen_decoder_prefill(ctx,
                                  input_embeds + (size_t)reused_prefill * dim,
                                  delta_prefill);
         }
+        ctx->probe_row = -1;
         prefill_total_tokens += prefill_len;
         prefill_reused_tokens += reused_prefill;
+
+        /* What the model would have said after "language" itself. */
+        int gate_step = 0;
+        if (probing) {
+            int lang_pos = suffix_off + SUFFIX_BASE_LEN;   /* the "language" token */
+            int ids[2] = { ctx->none_lang_token, ctx->force_prompt_tokens[1] };
+            float pr[2] = { -1.0f, -1.0f };
+            int top = -1;
+            if (lang_pos >= reused_prefill && lang_pos < prefill_len &&
+                qwen_decoder_prefill_row_probs(ctx, lang_pos - reused_prefill, ids, 2, pr, &top) == 0) {
+                if (!is_final && speech_gate > 0 && pr[0] >= speech_gate) gate_step = 1;
+                if (probe_log) {
+                    const char *tp = qwen_tokenizer_decode(tokenizer, top);
+                    fprintf(stderr, "  Speech gate: P(None) %.4f, P(%s) %.4f, top '%s'%s\n",
+                            pr[0], ctx->force_language, pr[1], tp ? tp : "?", gate_step ? ", skipped" : "");
+                }
+            }
+        }
 
         float *last_embed = input_embeds + (size_t)prefill_len * dim;
         int token = qwen_decoder_forward(ctx, last_embed);
@@ -2421,6 +2460,25 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             fprintf(stderr, "\xc2\xb7");  /* · = prefill */
             fflush(stderr);
         }
+
+        /* Gated: like a silence skip, nothing is decoded or emitted and the
+         * audio stays for the next step. */
+        if (gate_step) {
+            gated_steps++;
+            gated_run++;
+            /* Two gated steps in a row and nothing held: a pause reset, so the
+             * noise does not pile up for the next step that passes. */
+            if (gate_reset && gated_run >= 2 && held_text_tokens == 0) {
+                STREAM_EVENT("speech gate reset");
+                STREAM_PAUSE_RESET();
+                gate_resets++;
+                gated_run = 0;
+            }
+            ctx->perf_total_ms += get_time_ms() - chunk_t0;
+            chunk_idx++;
+            continue;
+        }
+        gated_run = 0;
 
         /* ---- Autoregressive decode ---- */
         t0 = get_time_ms();
@@ -3133,6 +3191,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         fprintf(stderr, "  Prefill reuse: %d/%d tokens (%.1f%%)\n",
                 prefill_reused_tokens, prefill_total_tokens, reuse_pct);
     }
+    if (qwen_verbose >= 2 && gated_steps > 0)
+        fprintf(stderr, "  Speech gate: %d steps skipped, %d resets\n", gated_steps, gate_resets);
     free(prev_prefill_embeds);
     free(raw_tokens);
     free(stable_text_tokens);

@@ -75,6 +75,7 @@ From `qwen_load()` and CLI:
 - Stream unfixed chunks: `2`
 - Stream max new tokens/chunk: `32`
 - `--skip-silence`: on for `--stdin --stream` (`--no-skip-silence` turns it off), off otherwise
+- `--speech-gate`: 0.5 for `--stream` with `--language` (`0` turns it off)
 - Encoder infer attention window: `8s` (`--enc-window-sec` in `[1,8]`)
 
 ## Repository Map
@@ -184,6 +185,7 @@ Current streaming behavior in `qwen_transcribe_stream()`:
 - Held text (after the last agreed point) is decoded again each step: the step token limit includes it, and a periodic reset waits for it to be committed
 - A stall reset (steps with speech but no new text) drops the text prefix and decodes the stalled audio again from the cached encoder windows
 - Chunks over 2 s: a stall is declared after 8 s instead of 4 chunks, and the first 4 s instead of 2 chunks are left unfixed (2 s and shorter chunks are unchanged)
+- With `--language`, a step whose prediction at the forced `language` position is None with P >= `--speech-gate` is skipped like a silent chunk; two in a row with no held text are a pause reset
 - Monotonic commit frontier (no retracting already-emitted text)
 
 Debug/env switch:
@@ -193,6 +195,7 @@ Debug/env switch:
 - `QWEN_STREAM_NO_BACKLOG=1` limits a step's tokens by its new audio only, not by the held text it decodes again (debug/A-B only)
 - `QWEN_STREAM_NO_HELD_WAIT=1` lets a periodic reset drop held text instead of waiting for it to be committed (debug/A-B only)
 - `QWEN_STREAM_NO_STALL_KEEP=1` lets a stall reset drop the audio of the stall instead of decoding it again (debug/A-B only)
+- `QWEN_STREAM_NO_GATE_RESET=1` keeps the speech gate but without the pause reset after two skipped steps (debug/A-B only)
 - `QWEN_STREAM_NO_DRAFT=1` disables reusing the previous step's tokens as a one-pass draft (debug/regression only; output is identical either way)
 
 Important caveat:

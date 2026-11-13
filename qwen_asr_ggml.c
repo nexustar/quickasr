@@ -403,6 +403,9 @@ int qwen_ggml_decode(qwen_ctx_t *ctx, const float *embeds, int n, int want_logit
     float eps = cfg->dec_rms_norm_eps;
     int p0 = ctx->kv_cache_len;
     int kv_len = p0 + n;
+    /* A prefill may also return the next-token logits of one row (ctx->probe_row). */
+    int probe = (!want_logits && ctx->probe_row >= 0 && ctx->probe_row < n) ? ctx->probe_row : -1;
+    ctx->probe_ready = 0;
 
     if (kv_len > g->kv_max) {
         int m = g->kv_max;
@@ -444,7 +447,7 @@ int qwen_ggml_decode(qwen_ctx_t *ctx, const float *embeds, int n, int want_logit
                                               ggml_view_2d(c, g->k[layer], kv_dim, n, row, (size_t)p0 * row)));
         ggml_build_forward_expand(gf, ggml_cpy(c, v,
                                               ggml_view_2d(c, g->v[layer], kv_dim, n, row, (size_t)p0 * row)));
-        if (last && !want_logits) break;   /* only the KV of the last layer is needed */
+        if (last && !want_logits && probe < 0) break;   /* only the KV of the last layer is needed */
 
         struct ggml_tensor *kc = ggml_permute(c, ggml_view_3d(c, g->k[layer], hd, n_kv, kv_len,
                                                              (size_t)hd * sizeof(ggml_fp16_t), row, 0),
@@ -466,6 +469,11 @@ int qwen_ggml_decode(qwen_ctx_t *ctx, const float *embeds, int n, int want_logit
     struct ggml_tensor *logits = NULL;
     if (want_logits) {
         logits = ggml_mul_mat(c, g->tok_emb, norm_mul(c, x, g->norm, eps));
+        ggml_set_output(logits);
+        ggml_build_forward_expand(gf, logits);
+    } else if (probe >= 0) {
+        struct ggml_tensor *xr = ggml_view_2d(c, x, dim, 1, x->nb[1], (size_t)probe * x->nb[1]);
+        logits = ggml_mul_mat(c, g->tok_emb, norm_mul(c, ggml_cont(c, xr), g->norm, eps));
         ggml_set_output(logits);
         ggml_build_forward_expand(gf, logits);
     }
@@ -492,10 +500,10 @@ int qwen_ggml_decode(qwen_ctx_t *ctx, const float *embeds, int n, int want_logit
     ggml_backend_tensor_set(mask, g->mask, 0, mn * sizeof(ggml_fp16_t));
 
     if (!compute(g, gf)) { ggml_free(c); qwen_ggml_lost(ctx); return -1; }
-    report_sched(g, gf, logits ? (n > 1 ? "batch" : "decode") : "prefill");
+    report_sched(g, gf, want_logits ? (n > 1 ? "batch" : "decode") : "prefill");
 
     if (logits) {
-        size_t need = (size_t)n * cfg->vocab_size;
+        size_t need = (size_t)(want_logits ? n : 1) * cfg->vocab_size;
         if (need > g->logits_cap) {
             free(g->logits);
             g->logits = (float *)malloc(need * sizeof(float));
@@ -503,6 +511,7 @@ int qwen_ggml_decode(qwen_ctx_t *ctx, const float *embeds, int n, int want_logit
             if (!g->logits) { ggml_free(c); return -1; }
         }
         ggml_backend_tensor_get(logits, g->logits, 0, need * sizeof(float));
+        if (probe >= 0) ctx->probe_ready = 1;
     }
     ggml_free(c);
     return 0;

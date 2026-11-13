@@ -84,6 +84,7 @@ Common options:
 | `--language <name>` | Force the language (otherwise auto-detected), e.g. `Chinese`, `English` |
 | `--prompt <text>` | System prompt to bias spelling, e.g. `"Preserve spelling: PostgreSQL"` |
 | `--skip-silence` | Skip silent audio; on by default with `--stdin --stream` (`--no-skip-silence` turns it off) |
+| `--speech-gate <p>` | With `--stream` and `--language`: skip steps the model itself calls speech-free, so noise is not written as text (default `0.5`, `0` turns it off) |
 | `--silent` / `--debug` | Only the text on stdout / verbose diagnostics on stderr |
 
 `./quickasr -h` lists every option. `./quickasr quantize <model_dir> <out_dir>` writes an

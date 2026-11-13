@@ -108,6 +108,9 @@ static void usage(const char *prog) {
     fprintf(stderr, "                             the next speech without the earlier text as context\n");
     fprintf(stderr, "                             (default 3000, 0=off). A pause is a stall of the input,\n");
     fprintf(stderr, "                             or with --skip-silence quiet audio\n");
+    fprintf(stderr, "  --speech-gate <p>          With --stream and --language: skip a step when the model\n");
+    fprintf(stderr, "                             would have called its audio no speech with probability\n");
+    fprintf(stderr, "                             >= p, so noise is not written as text (default 0.5, 0=off)\n");
     fprintf(stderr, "  --stream-json              With --stream: print one JSON object per line,\n");
     fprintf(stderr, "                             {\"commit\":..., \"tail\":...}: commit is final text to\n");
     fprintf(stderr, "                             append, tail is the provisional rest and replaces the\n");
@@ -181,6 +184,7 @@ int main(int argc, char **argv) {
     float stream_chunk_sec = -1; /* -1 = use default (2s) */
     int stream_idle_flush_ms = -1; /* -1 = use default (800) */
     int stream_pause_reset_ms = -1; /* -1 = use default (3000) */
+    float speech_gate = -1.0f;      /* -1 = use default (0.5) */
     int stream_json = 0;
     float enc_window_sec = -1;   /* -1 = use default (8s) */
     const char *prompt_text = NULL;
@@ -217,6 +221,12 @@ int main(int argc, char **argv) {
             stream_idle_flush_ms = atoi(argv[++i]);
             if (stream_idle_flush_ms < 0) {
                 fprintf(stderr, "Error: --stream-idle-flush-ms must be >= 0\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--speech-gate") == 0 && i + 1 < argc) {
+            speech_gate = (float)atof(argv[++i]);
+            if (speech_gate < 0.0f || speech_gate > 1.0f) {
+                fprintf(stderr, "Error: --speech-gate must be in [0, 1]\n");
                 return 1;
             }
         } else if (strcmp(argv[i], "--stream-json") == 0) {
@@ -323,6 +333,7 @@ int main(int argc, char **argv) {
     if (stream_chunk_sec >= 0) ctx->stream_chunk_sec = stream_chunk_sec;
     if (stream_idle_flush_ms >= 0) ctx->stream_idle_flush_ms = stream_idle_flush_ms;
     if (stream_pause_reset_ms >= 0) ctx->stream_pause_reset_ms = stream_pause_reset_ms;
+    if (speech_gate >= 0.0f) ctx->stream_speech_gate = speech_gate;
     if (past_text_conditioning_mode >= 0)
         ctx->past_text_conditioning = past_text_conditioning_mode;
     else if (stream_mode)
