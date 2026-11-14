@@ -1492,6 +1492,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     const char *no_gate_reset_env = getenv("QWEN_STREAM_NO_GATE_RESET");
     int gate_reset = !(no_gate_reset_env && no_gate_reset_env[0] != '\0' && strcmp(no_gate_reset_env, "0") != 0);
     int gated_steps = 0, gate_resets = 0;
+    const char *no_floor_cap_env = getenv("QWEN_STREAM_NO_FLOOR_CAP");
+    int floor_capped = !(no_floor_cap_env && no_floor_cap_env[0] != '\0' && strcmp(no_floor_cap_env, "0") != 0);
     int gated_run = 0;   /* consecutive gated steps */
     const char *no_draft_env = getenv("QWEN_STREAM_NO_DRAFT");
     int use_draft = !(no_draft_env && no_draft_env[0] != '\0' && strcmp(no_draft_env, "0") != 0);
@@ -1569,6 +1571,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     #define QWEN_STREAM_EP_MIN_HIST 100
     #define QWEN_STREAM_EP_FLOOR_PCT 10
     #define QWEN_STREAM_EP_SPEECH_RATIO 3.0f
+    #define QWEN_STREAM_EP_LOUD_PCT 90
+    #define QWEN_STREAM_EP_FLOOR_BELOW 0.316f  /* -10 dB */
     #define QWEN_STREAM_EP_MIN_SPEECH_RMS 0.001f
     #define QWEN_STREAM_EP_SEC 1.0
 
@@ -2034,8 +2038,15 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 if (ep_hist && ep_sorted && ep_hist_count >= QWEN_STREAM_EP_MIN_HIST) {
                     memcpy(ep_sorted, ep_hist, (size_t)ep_hist_count * sizeof(float));
                     qsort(ep_sorted, (size_t)ep_hist_count, sizeof(float), cmp_float_asc);
-                    sp_thr = ep_sorted[ep_hist_count * QWEN_STREAM_EP_FLOOR_PCT / 100] *
-                             QWEN_STREAM_EP_SPEECH_RATIO;
+                    float floor_rms = ep_sorted[ep_hist_count * QWEN_STREAM_EP_FLOOR_PCT / 100];
+                    /* Live music never gets quiet: its floor is the music
+                     * itself, and the voice in it never clears 3x that. So
+                     * the floor stays 10 dB under the loud end (90th
+                     * percentile), whatever the input level. */
+                    float loud = ep_sorted[ep_hist_count * QWEN_STREAM_EP_LOUD_PCT / 100] *
+                                 QWEN_STREAM_EP_FLOOR_BELOW;
+                    if (floor_capped && floor_rms > loud) floor_rms = loud;
+                    sp_thr = floor_rms * QWEN_STREAM_EP_SPEECH_RATIO;
                     if (sp_thr < QWEN_STREAM_EP_MIN_SPEECH_RMS) sp_thr = QWEN_STREAM_EP_MIN_SPEECH_RMS;
                 }
                 for (int f = 0; f < n_fr && ep_hist; f++) {

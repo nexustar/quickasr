@@ -195,6 +195,7 @@ Debug/env switch:
 - `QWEN_STREAM_NO_BACKLOG=1` limits a step's tokens by its new audio only, not by the held text it decodes again (debug/A-B only)
 - `QWEN_STREAM_NO_HELD_WAIT=1` lets a periodic reset drop held text instead of waiting for it to be committed (debug/A-B only)
 - `QWEN_STREAM_NO_STALL_KEEP=1` lets a stall reset drop the audio of the stall instead of decoding it again (debug/A-B only)
+- `QWEN_STREAM_NO_FLOOR_CAP=1` lets the pause test's noise floor come within 10 dB of the loud end again (live music then reads as silence; debug/A-B only)
 - `QWEN_STREAM_NO_GATE_RESET=1` keeps the speech gate but without the pause reset after two skipped steps (debug/A-B only)
 - `QWEN_STREAM_NO_DRAFT=1` disables reusing the previous step's tokens as a one-pass draft (debug/regression only; output is identical either way)
 
