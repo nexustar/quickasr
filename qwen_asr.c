@@ -1240,6 +1240,27 @@ static int stream_tail_repeat_blocks(const int *tokens, int n_tokens, int max_pe
     return best_reps;
 }
 
+/* Like stream_tail_repeat_blocks, for periods in [min_period, max_period]
+ * only: the longest-reaching period with at least min_reps copies. */
+static int stream_tail_long_repeat(const int *tokens, int n_tokens, int min_period,
+                                   int max_period, int min_reps, int *out_period) {
+    int best_reps = 0, best_period = 0;
+    if (out_period) *out_period = 0;
+    for (int p = min_period; p <= max_period && p * min_reps <= n_tokens; p++) {
+        int reps = 1;
+        while ((reps + 1) * p <= n_tokens &&
+               memcmp(tokens + n_tokens - (reps + 1) * p, tokens + n_tokens - reps * p,
+                      (size_t)p * sizeof(int)) == 0)
+            reps++;
+        if (reps >= min_reps && reps * p > best_reps * best_period) {
+            best_reps = reps;
+            best_period = p;
+        }
+    }
+    if (out_period) *out_period = best_period;
+    return best_period ? best_reps : 0;
+}
+
 typedef struct {
     int64_t start_sample;
     int n_samples;
@@ -1500,6 +1521,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      * the next step's header uses it. The first guess can be wrong (a few
      * seconds of Japanese read as Korean) and would stay until a pause. */
     const char *no_lang_upd_env = getenv("QWEN_STREAM_NO_LANG_UPDATE");
+    const char *no_long_loop_env = getenv("QWEN_STREAM_NO_LONG_LOOP");
+    int use_long_loop = !(no_long_loop_env && no_long_loop_env[0] != '\0' && strcmp(no_long_loop_env, "0") != 0);
     int lang_upd = ctx->n_force_prompt_tokens <= 0 &&
         !(no_lang_upd_env && no_lang_upd_env[0] != '\0' && strcmp(no_lang_upd_env, "0") != 0);
     int lang_tab[32][6];
@@ -1549,6 +1572,12 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     #define QWEN_STREAM_OVERLAP_MIN_TOKENS 4
     #define QWEN_STREAM_DEGEN_MAX_PERIOD 32
     #define QWEN_STREAM_DEGEN_MIN_REPEATS 4
+    /* Longer loops: a sentence or two written over and over, a step at a
+     * time, at about the pace of speech (so the token limit does not catch
+     * them). Speech does not repeat a block this long word for word right
+     * away; two copies in a row are a loop. */
+    #define QWEN_STREAM_LONG_LOOP_MAX_PERIOD 96
+    #define QWEN_STREAM_LONG_LOOP_MIN_REPEATS 2
     /* Steps at the token limit without progress before the recovery reset. */
     #define QWEN_STREAM_STALE_CHUNKS 4
     /* Much longer and the 1.7B model drifts into writing no punctuation. */
@@ -2866,9 +2895,22 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int did_periodic_reset = 0;
         {
             int tail_period = 0;
+            int long_loop = 0;
             int tail_reps = stream_tail_repeat_blocks(candidate_tokens, candidate_len,
                                                       QWEN_STREAM_DEGEN_MAX_PERIOD,
                                                       &tail_period);
+            if (use_long_loop && !(tail_period > 0 && tail_reps >= QWEN_STREAM_DEGEN_MIN_REPEATS)) {
+                int lp = 0;
+                int lr = stream_tail_long_repeat(candidate_tokens, candidate_len,
+                                                 QWEN_STREAM_DEGEN_MAX_PERIOD + 1,
+                                                 QWEN_STREAM_LONG_LOOP_MAX_PERIOD,
+                                                 QWEN_STREAM_LONG_LOOP_MIN_REPEATS, &lp);
+                if (lr > 0) {
+                    tail_reps = lr;
+                    tail_period = lp;
+                    long_loop = 1;
+                }
+            }
             int candidate_advance = candidate_len - n_stable_text_tokens;
             if (!is_final && n_generated >= step_cap && candidate_advance <= 1) {
                 stagnant_chunks++;
@@ -2880,6 +2922,9 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
              * stuck in a loop also runs into the token limit. */
             if (tail_period > 0 && tail_reps >= QWEN_STREAM_DEGEN_MIN_REPEATS &&
                 n_generated >= step_cap) {
+                recovery_reset = 1;
+            }
+            if (long_loop) {
                 recovery_reset = 1;
             }
             if (stagnant_chunks >= stale_chunks) {
@@ -2906,7 +2951,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 else if (dropped_repeat_tokens >= 8)
                     w = snprintf(recovery_why, sizeof(recovery_why), "repeated tokens");
                 else
-                    w = snprintf(recovery_why, sizeof(recovery_why), "loop of %d", tail_reps);
+                    w = snprintf(recovery_why, sizeof(recovery_why), "%sloop of %d", long_loop ? "long " : "", tail_reps);
                 if (tail_period > 0 && tail_reps >= 2 && tail_period <= candidate_len) {
                     w += snprintf(recovery_why + w, sizeof(recovery_why) - (size_t)w, ", \"");
                     for (int q = candidate_len - tail_period; q < candidate_len; q++) {
@@ -2923,7 +2968,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             }
 
             if (recovery_reset && tail_period > 0 &&
-                (tail_reps >= QWEN_STREAM_DEGEN_MIN_REPEATS || (force_recovery && tail_reps >= 3))) {
+                (tail_reps >= QWEN_STREAM_DEGEN_MIN_REPEATS || long_loop || (force_recovery && tail_reps >= 3))) {
                 /* Emit what precedes the loop with one copy of it. Loops
                  * nest ("ああああ。ああああ。"), so cut repeatedly. */
                 int reps = tail_reps, period = tail_period;
