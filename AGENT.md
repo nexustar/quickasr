@@ -185,6 +185,7 @@ Current streaming behavior in `qwen_transcribe_stream()`:
 - Held text (after the last agreed point) is decoded again each step: the step token limit includes it, and a periodic reset waits for it to be committed
 - A stall reset (steps with speech but no new text) drops the text prefix and decodes the stalled audio again from the cached encoder windows
 - Chunks over 2 s: a stall is declared after 8 s instead of 4 chunks, and the first 4 s instead of 2 chunks are left unfixed (2 s and shorter chunks are unchanged)
+- Without `--language`, while the model's `language X<asr_text>` header is still at the start of the prefix, each step sets its language to the one the model reads from the audio at that position; once the prefix is capped the header is dropped on purpose
 - With `--language`, a step whose prediction at the forced `language` position is None with P >= `--speech-gate` is skipped like a silent chunk; two in a row with no held text are a pause reset
 - Monotonic commit frontier (no retracting already-emitted text)
 
@@ -196,6 +197,7 @@ Debug/env switch:
 - `QWEN_STREAM_NO_HELD_WAIT=1` lets a periodic reset drop held text instead of waiting for it to be committed (debug/A-B only)
 - `QWEN_STREAM_NO_STALL_KEEP=1` lets a stall reset drop the audio of the stall instead of decoding it again (debug/A-B only)
 - `QWEN_STREAM_NO_FLOOR_CAP=1` lets the pause test's noise floor come within 10 dB of the loud end again (live music then reads as silence; debug/A-B only)
+- `QWEN_STREAM_NO_LANG_UPDATE=1` keeps the language header the model first wrote (debug/A-B only)
 - `QWEN_STREAM_NO_GATE_RESET=1` keeps the speech gate but without the pause reset after two skipped steps (debug/A-B only)
 - `QWEN_STREAM_NO_DRAFT=1` disables reusing the previous step's tokens as a one-pass draft (debug/regression only; output is identical either way)
 

@@ -598,12 +598,13 @@ static int prepare_prompt_tokens(qwen_ctx_t *ctx, qwen_tokenizer_t *tokenizer) {
         }
         ctx->force_prompt_tokens[n_lang_txt] = QWEN_TOKEN_ASR_TEXT;
         free(lang_txt_tokens);
-
-        int n_none = 0;
-        int *none_tokens = qwen_tokenizer_encode(tokenizer, "language None", &n_none);
-        ctx->none_lang_token = (none_tokens && n_none >= 2) ? none_tokens[1] : -1;
-        free(none_tokens);
     }
+
+    int n_none = 0;
+    int *none_tokens = qwen_tokenizer_encode(tokenizer, "language None", &n_none);
+    ctx->lang_word_token = (none_tokens && n_none >= 2) ? none_tokens[0] : -1;
+    ctx->none_lang_token = (none_tokens && n_none >= 2) ? none_tokens[1] : -1;
+    free(none_tokens);
 
     ctx->prompt_tokens_ready = 1;
     return 0;
@@ -1494,6 +1495,21 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     int gated_steps = 0, gate_resets = 0;
     const char *no_floor_cap_env = getenv("QWEN_STREAM_NO_FLOOR_CAP");
     int floor_capped = !(no_floor_cap_env && no_floor_cap_env[0] != '\0' && strcmp(no_floor_cap_env, "0") != 0);
+    /* Auto language: each step reads the language the model would write now
+     * at the header's "language" token (it sees only the audio there), and
+     * the next step's header uses it. The first guess can be wrong (a few
+     * seconds of Japanese read as Korean) and would stay until a pause. */
+    const char *no_lang_upd_env = getenv("QWEN_STREAM_NO_LANG_UPDATE");
+    int lang_upd = ctx->n_force_prompt_tokens <= 0 &&
+        !(no_lang_upd_env && no_lang_upd_env[0] != '\0' && strcmp(no_lang_upd_env, "0") != 0);
+    int lang_tab[32][6];
+    int lang_tab_n[32];
+    int lang_tab_name[32];
+    int n_lang_tab = 0;
+    int cur_lang = -1;          /* table index of the language to write in the header */
+    int lang_epoch = 0, seen_lang_epoch = 0;    /* bumped when the text is reset */
+    int *pfx = NULL;
+    int pfx_cap = 0;
     int gated_run = 0;   /* consecutive gated steps */
     const char *no_draft_env = getenv("QWEN_STREAM_NO_DRAFT");
     int use_draft = !(no_draft_env && no_draft_env[0] != '\0' && strcmp(no_draft_env, "0") != 0);
@@ -1618,6 +1634,21 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     if (!tokenizer) {
         free(compacted_samples);
         return NULL;
+    }
+    if (lang_upd) {
+        int n_names = (int)(sizeof(QWEN_SUPPORTED_LANGUAGES) / sizeof(QWEN_SUPPORTED_LANGUAGES[0]));
+        for (int i = 0; i < n_names && n_lang_tab < 32; i++) {
+            char t[64];
+            snprintf(t, sizeof(t), "language %s", QWEN_SUPPORTED_LANGUAGES[i]);
+            int n = 0;
+            int *tk = qwen_tokenizer_encode(tokenizer, t, &n);
+            if (tk && n >= 2 && n - 1 <= 6) {
+                memcpy(lang_tab[n_lang_tab], tk + 1, (size_t)(n - 1) * sizeof(int));
+                lang_tab_name[n_lang_tab] = i;
+                lang_tab_n[n_lang_tab++] = n - 1;
+            }
+            free(tk);
+        }
     }
     if (prepare_prompt_tokens(ctx, tokenizer) != 0) {
         qwen_tokenizer_free(tokenizer);
@@ -1765,6 +1796,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
      * "Aligned": the new text is joined to the emitted text by alignment
      * instead of being emitted whole. */
 #define STREAM_RESET_TEXT(keep_) do { \
+        lang_epoch++; \
         n_raw_tokens = (keep_); \
         n_stable_text_tokens = 0; \
         min_prefix_raw = (keep_); \
@@ -2334,6 +2366,52 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 prefix_offset = n_prefix_tokens_full - n_prefix_tokens;
             }
         }
+        /* The language header the prefix opens with (auto language only).
+         * "language None" followed by text (the model does write that) is no
+         * language to correct and is left as written. */
+        int head_len = 0;
+        if (ctx->n_force_prompt_tokens <= 0 && n_prefix_tokens >= 3 &&
+            raw_tokens[0] == ctx->lang_word_token && raw_tokens[1] != ctx->none_lang_token) {
+            for (int i = 1; i < n_raw_tokens && i < 8; i++)
+                if (raw_tokens[i] == QWEN_TOKEN_ASR_TEXT) { head_len = i + 1; break; }
+        }
+        /* Once the prefix is capped its start, header included, is dropped on
+         * purpose: a header kept in front of later text keeps pushing that
+         * one language, and on audio that mixes languages (or switches) that
+         * costs more than it helps. Text written so far carries the language
+         * from there on. */
+        int kept_head = prefix_offset == 0 ? head_len : 0;
+        if (n_prefix_tokens <= kept_head) kept_head = 0;
+
+        /* The prefix as fed: the raw tokens, with the header's language updated. */
+        if (pfx_cap < n_prefix_tokens + 8) {
+            pfx_cap = n_prefix_tokens + 8;
+            int *g = (int *)realloc(pfx, (size_t)pfx_cap * sizeof(int));
+            if (g) pfx = g; else pfx_cap = 0;
+        }
+        int lang_hdr = -1;  /* table index of the header's language as fed */
+        if (lang_upd && lang_epoch != seen_lang_epoch) {
+            /* Text reset without its header: the model writes a new one. */
+            if (n_raw_tokens == 0) cur_lang = -1;
+            seen_lang_epoch = lang_epoch;
+        }
+        if (pfx_cap > 0) {
+            int n = 0;
+            int tail_from = kept_head > 0 ? prefix_offset + kept_head : prefix_offset;
+            if (kept_head > 0) {
+                int use = lang_upd ? cur_lang : -1;
+                if (use >= 0) {
+                    pfx[n++] = ctx->lang_word_token;
+                    for (int k = 0; k < lang_tab_n[use]; k++) pfx[n++] = lang_tab[use][k];
+                    pfx[n++] = QWEN_TOKEN_ASR_TEXT;
+                    lang_hdr = use;
+                } else {
+                    for (int k = 0; k < kept_head; k++) pfx[n++] = raw_tokens[k];
+                }
+            }
+            for (int r = tail_from; r < prefix_offset + n_prefix_tokens; r++) pfx[n++] = raw_tokens[r];
+            n_prefix_tokens = n;
+        }
 
         /* ---- Build input embeddings ---- */
         /* [PREFIX_HEAD] [prompt] [PREFIX_TAIL] [audio] [SUFFIX_BASE] [force-lang] [prefix_tokens] */
@@ -2389,7 +2467,8 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         for (int i = 0; i < n_prefix_tokens; i++)
             tok_embed_bf16_to_f32(input_embeds + (text_off + i) * dim,
                                   ctx->decoder.tok_embeddings_bf16,
-                                  raw_tokens[prefix_offset + i], dim);
+                                  pfx_cap > 0 ? pfx[i] :
+                                  raw_tokens[i < kept_head && prefix_offset > 0 ? i : prefix_offset + i], dim);
 
         /* ---- Decoder prefill + first token ---- */
         t0 = get_time_ms();
@@ -2409,7 +2488,11 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
          * keep the longest unchanged prefill prefix and only prefill delta tokens. */
         ctx->kv_cache_len = reused_prefill;
         int delta_prefill = prefill_len - reused_prefill;
-        int probing = (probe_log || speech_gate > 0) && ctx->n_force_prompt_tokens >= 3 && ctx->none_lang_token >= 0;
+        /* Forced: the prompt's "language X"; auto: the header the prefix opens with. */
+        int probe_lang_token = ctx->n_force_prompt_tokens >= 3 ? ctx->force_prompt_tokens[1] :
+                               kept_head > 0 ? (pfx_cap > 0 ? pfx[1] : raw_tokens[1]) : -1;
+        int probing = (probe_log || lang_upd || (speech_gate > 0 && ctx->n_force_prompt_tokens > 0)) &&
+                      probe_lang_token >= 0 && ctx->none_lang_token >= 0;
         ctx->probe_row = probing ? suffix_off + SUFFIX_BASE_LEN - reused_prefill : -1;
         if (delta_prefill > 0) {
             qwen_decoder_prefill(ctx,
@@ -2424,16 +2507,27 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
         int gate_step = 0;
         if (probing) {
             int lang_pos = suffix_off + SUFFIX_BASE_LEN;   /* the "language" token */
-            int ids[2] = { ctx->none_lang_token, ctx->force_prompt_tokens[1] };
+            int ids[2] = { ctx->none_lang_token, probe_lang_token };
             float pr[2] = { -1.0f, -1.0f };
             int top = -1;
             if (lang_pos >= reused_prefill && lang_pos < prefill_len &&
                 qwen_decoder_prefill_row_probs(ctx, lang_pos - reused_prefill, ids, 2, pr, &top) == 0) {
-                if (!is_final && speech_gate > 0 && pr[0] >= speech_gate) gate_step = 1;
+                if (!is_final && speech_gate > 0 && ctx->n_force_prompt_tokens > 0 && pr[0] >= speech_gate) gate_step = 1;
+                if (lang_upd && ctx->n_force_prompt_tokens <= 0) {
+                    int li = -1;
+                    for (int k = 0; k < n_lang_tab && li < 0; k++) if (lang_tab[k][0] == top) li = k;
+                    int now = lang_hdr;
+                    if (now < 0) for (int k = 0; k < n_lang_tab && now < 0; k++) if (lang_tab[k][0] == probe_lang_token) now = k;
+                    if (li >= 0 && li != now) {
+                        cur_lang = li;
+                        STREAM_EVENT("language -> %s", QWEN_SUPPORTED_LANGUAGES[lang_tab_name[li]]);
+                    }
+                }
                 if (probe_log) {
                     const char *tp = qwen_tokenizer_decode(tokenizer, top);
                     fprintf(stderr, "  Speech gate: P(None) %.4f, P(%s) %.4f, top '%s'%s\n",
-                            pr[0], ctx->force_language, pr[1], tp ? tp : "?", gate_step ? ", skipped" : "");
+                            pr[0], qwen_tokenizer_decode(tokenizer, probe_lang_token), pr[1],
+                            tp ? tp : "?", gate_step ? ", skipped" : "");
                 }
             }
         }
@@ -3081,6 +3175,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                     agreed_raw = n_raw_tokens;
                     held_text_tokens = 0;
                     prev_prefill_len = 0;
+                    lang_epoch++;
                     STREAM_RESET_AUDIO(QWEN_STREAM_RESET_KEEP_ENC_WINDOWS, 0);
                     STREAM_RESET_DONE();
                     did_periodic_reset = 1;
@@ -3208,6 +3303,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
     free(raw_tokens);
     free(stable_text_tokens);
     free(emitted_text_tokens);
+    free(pfx);
     free(upd_commit.buf);
     free(ep_hist);
     free(ep_sorted);

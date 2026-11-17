@@ -255,6 +255,7 @@ typedef struct {
     int n_prompt_tokens;
     int *force_prompt_tokens;      /* cached token ids for "language X" + <asr_text> */
     int none_lang_token;           /* first token of "None" after "language" (speech gate) */
+    int lang_word_token;           /* the "language" token that opens the language header */
     int probe_row;                 /* row of the next prefill whose next-token logits to keep (-1: none) */
     int probe_ready;               /* the GPU prefill left that row's logits in its logits buffer */
     int n_force_prompt_tokens;
